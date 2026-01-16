@@ -86,10 +86,10 @@ function q_local(load::GravityLoad)
 
     LCS = load.element.LCS
     l = load.element.length
-    value = [0., 0., -1.] .* load.element.ρ .* load.element.section.A
+    value = [0., 0., -1.] .* load.element.section.ρ .* load.element.section.A .* load.factor
 
     # load vector in LCS
-    plocal = element.R[1:3, 1:3] * value .* LCS
+    plocal = load.element.R[1:3, 1:3] * value .* LCS
 
     #axial end forces
     ax1 = ax2 = - dot(plocal[1], LCS[1]) * l / 2
