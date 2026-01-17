@@ -59,10 +59,10 @@ function shatter!(model::Model,
 
         # element to shatter
         element = model.elements[indexerRev[index]]
-        startpos = element.nodeStart.position
+        startpos = [to_meters(p) for p in element.nodeStart.position]
         # L = length(element)
         # vec = local_x(element)
-        L = element.length
+        L = to_meters(element.length)
         vec = first(element.LCS)
 
         fractions = ordermatrix[index, 2:end-1]
@@ -197,7 +197,7 @@ function transfer!(load::PointLoad, id::Int64, inout::Bool, model::Model, elemen
 
 
     if inout && typecheck #if load is applied to a shattered element
-        position = load.element.length * load.position
+        position = to_meters(load.element.length) * load.position
         itransfer = findall(elementids .== id)
 
         endpositions = cumsum(getproperty.(model.elements[itransfer], :length))
@@ -374,8 +374,8 @@ function process_bridge!(model::Model)
 
         #element to shatter
         element = elements[ind2id[index]]
-        startpos = element.nodeStart.position
-        L = element.length
+        startpos = [to_meters(p) for p in element.nodeStart.position]
+        L = to_meters(element.length)
         vec = first(element.LCS)
 
         fractions = ordermat[index, 2:end-1]
@@ -509,7 +509,7 @@ function process_bridge!(model::Model)
 
                 if in(id, itrueactive)
 
-                    position = load.element.length * load.position
+                    position = to_meters(load.element.length) * load.position
 
                     itransfer = findall(elementids .== id)
 

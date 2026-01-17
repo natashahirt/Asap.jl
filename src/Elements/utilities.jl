@@ -19,7 +19,7 @@ function Base.findall(elements::Vector{TrussElement}, i::Symbol)
     return findall([element.id == i for element in elements])
 end
 
-Base.length(element::T) where {T<:AbstractElement} = norm(element.nodeEnd.position .- element.nodeStart.position)
+Base.length(element::T) where {T<:AbstractElement} = norm([to_meters(p) for p in (element.nodeEnd.position .- element.nodeStart.position)]) * u"m"
 
 function length!(element::T) where {T<:AbstractElement}
     element.length = length(element)
@@ -33,7 +33,8 @@ Get the local x vector of an element: element.nodeEnd.position - element.nodeSta
 `unit = true` gives the normalized vector.
 """
 function local_x(element::T; unit = true) where {T<:AbstractElement}
-    x = element.nodeEnd.position .- element.nodeStart.position
+    x_quantities = element.nodeEnd.position .- element.nodeStart.position
+    x = [to_meters(p) for p in x_quantities]
     unit ? normalize(x) : x
 end
 
@@ -121,7 +122,7 @@ end
 Extract the start and end points as two vectors.
 """
 function endpoints(element::T) where {T<:AbstractElement}
-    return [element.nodeStart.position, element.nodeEnd.position]
+    return [[to_meters(p) for p in element.nodeStart.position], [to_meters(p) for p in element.nodeEnd.position]]
 end
 
 """
@@ -130,7 +131,8 @@ end
 Extract the centerpoint of an element as a vector.
 """
 function midpoint(element::T) where {T<:AbstractElement}
-    return (element.nodeStart.position .+ element.nodeEnd.position) ./ 2
+    mid_quantities = (element.nodeStart.position .+ element.nodeEnd.position) ./ 2
+    return [to_meters(p) for p in mid_quantities]
 end
 
 """

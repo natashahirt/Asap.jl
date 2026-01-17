@@ -1,73 +1,69 @@
 abstract type AbstractNode end
 
 """
-    Node(position::Vector{Float64}, dofs::Vector{Bool}, id::Symbol = nothing)
+    Node(position::Vector{Quantity}, dofs::Vector{Bool}, id::Symbol = :node)
+    Node(position::Vector{Quantity}, fixity::Symbol, id::Symbol = :node)
 
-Instantiate a 6 DOF node with given position and fixities. Optional symbol identifier, `id`.
+Instantiate a 6 DOF node with given position and fixities.
 
-# Example
-```julia-repl
-julia> Node([4.3, 2.2, 10.4], [true, true, false, true, false, false])
-Node([4.3, 2.2, 10.4], Bool[1, 1, 0, 1, 0, 0], #undef, #undef, #undef, nothing)
-```
----------------------------------------------
-
-    Node(position::Vector{Float64}, fixity::Symbol, id::Symbol = nothing)
-
-Instantiate a 6 DOF node with given position and common boundary type. Optional symbol identifier, `id`.
+# Arguments
+- `position`: Vector of 3 distance quantities [x, y, z]
+- `dofs`: Vector of 6 booleans for DOF fixities, or a `fixity` symbol
+- `id`: Optional symbol identifier
 
 Available boundary conditions:
-- :free
-- :fixed
-- :pinned
-- :(x/y/z)free
-- :(x/y/z)fixed
+- :free, :fixed, :pinned
+- :(x/y/z)free, :(x/y/z)fixed
 
 # Example
-```julia-repl
-julia> Node([4.3, 2.2, 10.4], :zfixed)
-Node([4.3, 2.2, 10.4], Bool[1, 1, 0, 1, 1, 1], #undef, #undef, #undef, nothing)
-
+```julia
+Node([4.3u"m", 2.2u"m", 10.4u"m"], [true, true, false, true, false, false])
+Node([4.3u"m", 2.2u"m", 10.4u"m"], :zfixed)
 ```
 """
 mutable struct Node <: AbstractNode
-    position::Vector{Float64}
+    position::Vector{QuantityDistance}
     dof::Vector{Bool}
     nodeID::Int64
     globalID::Vector{Int64}
-    reaction::Vector{Float64}
-    displacement::Vector{Float64}
+    reaction::Vector{Quantity}  # Forces (N) for DOFs 1-3, moments (N*m) for DOFs 4-6
+    displacement::Vector{Quantity}  # Translations (m) for DOFs 1-3, rotations (rad) for DOFs 4-6
     id::Symbol
 
-    function Node(position::Vector{Float64}, dofs::Vector{Bool}, id = :node)
+    function Node(position::Base.AbstractVector{<:Unitful.Quantity}, dofs::Vector{Bool}, id = :node)
         @assert length(position) == 3 && length(dofs) == 6 "Position vector must be in R³, DOFs must be length 6"
+        
+        # Convert all positions to meters
+        pos_si = [uconvert(u"m", p) for p in position]
 
         node = new(
-            position,
+            pos_si,
             dofs,
             0,
             Vector{Int64}(undef, 6),
-            zeros(6),
-            zeros(6),
+            Vector{Quantity}(undef, 6),  # Will be populated in postprocessing
+            Vector{Quantity}(undef, 6),  # Will be populated in postprocessing
             id
         )
 
         return node
     end
 
-    function Node(position::Vector{Float64}, fixity::Symbol, id = :node)
-
+    function Node(position::Base.AbstractVector{<:Unitful.Quantity}, fixity::Symbol, id = :node)
         @assert length(position) == 3 "Position vector must be in R³"
 
         dofs = copy(fixDict[fixity])
+        
+        # Convert all positions to meters
+        pos_si = [uconvert(u"m", p) for p in position]
 
         node = new(
-            position,
+            pos_si,
             dofs,
             0,
             Vector{Int64}(undef, 6),
-            zeros(6),
-            zeros(6),
+            Vector{Quantity}(undef, 6),  # Will be populated in postprocessing
+            Vector{Quantity}(undef, 6),  # Will be populated in postprocessing
             id
         )
 
@@ -76,73 +72,69 @@ mutable struct Node <: AbstractNode
 end
 
 """
-    TrussNode(position::Vector{Float64}, dofs::Vector{Bool}, id::Symbol = nothing)
+    TrussNode(position::Vector{Quantity}, dofs::Vector{Bool}, id::Symbol = :node)
+    TrussNode(position::Vector{Quantity}, fixity::Symbol, id::Symbol = :node)
 
-Instantiate a 3 DOF node with given position and fixities. Optional symbol identifier, `id`.
+Instantiate a 3 DOF node with given position and fixities.
 
-# Example
-```julia-repl
-julia> TrussNode([1., 1., 56.], [false, true, true])
-TrussNode([1.0, 1.0, 56.0], Bool[0, 1, 1], #undef, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], nothing)
-```
----------------------------------------------
-
-    TrussNode(position::Vector{Float64}, fixity::Symbol, id::Symbol = nothing)
-
-Instantiate a 3 DOF node with given position and common boundary type. Optional symbol identifier, `id`.
+# Arguments
+- `position`: Vector of 3 distance quantities [x, y, z]
+- `dofs`: Vector of 3 booleans for DOF fixities, or a `fixity` symbol
+- `id`: Optional symbol identifier
 
 Available boundary conditions:
-- :free
-- :pinned
-- :(x/y/z)free
-- :(x/y/z)fixed
+- :free, :pinned
+- :(x/y/z)free, :(x/y/z)fixed
 
 # Example
-```julia-repl
-julia> TrussNode([1., 1., 56.], :pinned)
-TrussNode([1.0, 1.0, 56.0], Bool[0, 0, 0], #undef, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], nothing)
-
+```julia
+TrussNode([1.0u"m", 1.0u"m", 56.0u"m"], [false, true, true])
+TrussNode([1.0u"m", 1.0u"m", 56.0u"m"], :pinned)
 ```
 """
 mutable struct TrussNode <: AbstractNode
-    position::Vector{Float64}
+    position::Vector{QuantityDistance}
     dof::Vector{Bool}
     nodeID::Int64
     globalID::Vector{Int64}
-    reaction::Vector{Float64}
-    displacement::Vector{Float64}
+    reaction::Vector{Quantity}  # All forces (N)
+    displacement::Vector{Quantity}  # All translations (m)
     id::Symbol
 
-    function TrussNode(position::Vector{Float64}, dofs::Vector{Bool}, id = :node)
-        
+    function TrussNode(position::Base.AbstractVector{<:Unitful.Quantity}, dofs::Vector{Bool}, id = :node)
         @assert length(position) == length(dofs) == 3  "Position and dof vector must be in R³"
+        
+        # Convert all positions to meters
+        pos_si = [uconvert(u"m", p) for p in position]
 
         node = new(
-            position,
+            pos_si,
             dofs,
             0,
             Vector{Int64}(undef, 3),
-            zeros(3),
-            zeros(3),
+            Vector{Quantity}(undef, 3),  # Will be populated in postprocessing (all forces in N)
+            Vector{Quantity}(undef, 3),  # Will be populated in postprocessing (all translations in m)
             id
         )
 
         return node
     end
 
-    function TrussNode(position::Vector{Float64}, fixity::Symbol, id = :node)
-        
+    function TrussNode(position::Base.AbstractVector{<:Unitful.Quantity}, fixity::Symbol, id = :node)
         @assert length(position) == 3 "Position vector must be in R³"
 
         dofs = copy(fixDict[fixity][1:3])
+        
+        # Convert all positions to meters
+        pos_si = [uconvert(u"m", p) for p in position]
 
         node = new(
-            position,
+            pos_si,
             dofs,
             0,
             Vector{Int64}(undef, 3),
-            zeros(3),
-            zeros(3),
+            Vector{Quantity}(undef, 3),  # Will be populated in postprocessing (all forces in N)
+            Vector{Quantity}(undef, 3),  # Will be populated in postprocessing (all translations in m)
             id
         )
 

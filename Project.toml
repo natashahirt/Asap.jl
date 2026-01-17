@@ -6,8 +6,14 @@ version = "0.2.2"
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+StructuralUnits = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
+
+[sources]
+StructuralUnits = {path = "../../StructuralUnits"}
 
 [compat]
+Unitful = "1.27.0"
 julia = "1"
 
 [extras]

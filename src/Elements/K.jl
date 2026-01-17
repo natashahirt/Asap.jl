@@ -116,13 +116,43 @@ end
 
 Return the element stiffness matrix in LCS.
 """
-local_K(element::Element{FixedFixed}) = k_fixedfixed(element.section.E, element.section.A, element.length, element.section.G, element.section.Ix, element.section.Iy, element.section.J)
-local_K(element::Element{FixedFree}) = k_fixedfree(element.section.E, element.section.A, element.length, element.section.Ix, element.section.Iy)
-local_K(element::Element{FreeFixed}) = k_freefixed(element.section.E, element.section.A, element.length, element.section.Ix, element.section.Iy)
-local_K(element::Element{FreeFree}) = k_freefree(element.section.E, element.section.A, element.length)
-local_K(element::Element{Joist}) = k_joist(element.section.E, element.section.A, element.length, element.section.G, element.section.J)
+local_K(element::Element{FixedFixed}) = k_fixedfixed(
+    to_pascals(element.section.E),
+    to_meters_squared(element.section.A),
+    to_meters(element.length),
+    to_pascals(element.section.G),
+    to_meters_fourth(element.section.Ix),
+    to_meters_fourth(element.section.Iy),
+    to_meters_fourth(element.section.J)
+)
+local_K(element::Element{FixedFree}) = k_fixedfree(
+    to_pascals(element.section.E),
+    to_meters_squared(element.section.A),
+    to_meters(element.length),
+    to_meters_fourth(element.section.Ix),
+    to_meters_fourth(element.section.Iy)
+)
+local_K(element::Element{FreeFixed}) = k_freefixed(
+    to_pascals(element.section.E),
+    to_meters_squared(element.section.A),
+    to_meters(element.length),
+    to_meters_fourth(element.section.Ix),
+    to_meters_fourth(element.section.Iy)
+)
+local_K(element::Element{FreeFree}) = k_freefree(
+    to_pascals(element.section.E),
+    to_meters_squared(element.section.A),
+    to_meters(element.length)
+)
+local_K(element::Element{Joist}) = k_joist(
+    to_pascals(element.section.E),
+    to_meters_squared(element.section.A),
+    to_meters(element.length),
+    to_pascals(element.section.G),
+    to_meters_fourth(element.section.J)
+)
 
-local_K(element::TrussElement) = element.section.E * element.section.A / element.length .* [1 -1; -1 1]
+local_K(element::TrussElement) = to_pascals(element.section.E) * to_meters_squared(element.section.A) / to_meters(element.length) .* [1 -1; -1 1]
 
 """
     global_K!(element::Element)

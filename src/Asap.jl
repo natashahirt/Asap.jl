@@ -1,6 +1,12 @@
 module Asap
 
 using LinearAlgebra, SparseArrays
+using Unitful
+using StructuralUnits  # Shared unit definitions (lbf, kip, ksi, psf)
+
+# Units module (for type aliases and compatibility helpers)
+include("Units/units.jl")
+include("Units/compat.jl")
 
 # global axes
 const globalX::Vector{Float64} = [1., 0., 0.]
@@ -37,6 +43,7 @@ export axial_force
 include("Loads/loads.jl")
 include("Loads/utilities.jl")
 include("Loads/fixedEndForces.jl")
+export AbstractLoad
 export NodeForce
 export NodeMoment
 export LineLoad
@@ -63,6 +70,8 @@ export solve
 export connectivity
 export node_positions
 export volume
+export to_displacement_vec
+export to_reaction_vec
 
 # FORCE DENSITY METHOD
 include("FDM/FDM.jl")

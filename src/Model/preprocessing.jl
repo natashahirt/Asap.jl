@@ -103,7 +103,7 @@ Populate the global load vector `model.P` with a nodal force.
 """
 function populate_load!(model::AbstractModel, load::NodeForce)
     idx = load.node.globalID[1:3]
-    model.P[idx] += load.value
+    model.P[idx] += [to_newtons(v) for v in load.value]
 end
 
 """
@@ -113,7 +113,7 @@ Populate the global load vector P` with a nodal force.
 """
 function populate_load!(P::Vector{Float64}, load::NodeForce)
     idx = load.node.globalID[1:3]
-    P[idx] += load.value
+    P[idx] += [to_newtons(v) for v in load.value]
 end
 
 """
@@ -123,7 +123,7 @@ Populate the global load vector `model.P` with a nodal moment.
 """
 function populate_load!(model::Model, load::NodeMoment)
     idx = load.node.globalID[4:6]
-    model.P[idx] += load.value
+    model.P[idx] += [to_newton_meters(v) for v in load.value]
 end
 
 
@@ -134,7 +134,7 @@ Populate the global load vector `model.P` with a nodal moment.
 """
 function populate_load!(P::Vector{Float64}, load::NodeMoment)
     idx = load.node.globalID[4:6]
-    P[idx] += load.value
+    P[idx] += [to_newton_meters(v) for v in load.value]
 end
 
 """

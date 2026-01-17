@@ -6,10 +6,11 @@ Equivalent fixed end forces for a point load.
 function q_local(load::PointLoad)
     #values
     LCS = load.element.LCS
-    l = load.element.length
+    l = to_meters(load.element.length)
 
-    # load vector in LCS
-    plocal = load.element.R[1:3, 1:3] * load.value .* LCS
+    # load vector in LCS (strip units from load.value)
+    value_stripped = [to_newtons(v) for v in load.value]
+    plocal = load.element.R[1:3, 1:3] * value_stripped .* LCS
 
     #axial end forces
     ax1 = ax2 = - dot(plocal[1], LCS[1]) / 2
@@ -51,10 +52,11 @@ Equivalent fixed end forces for a line load
 """
 function q_local(load::LineLoad)
     LCS = load.element.LCS
-    l = load.element.length
+    l = to_meters(load.element.length)
 
-    # load vector in LCS
-    plocal = load.element.R[1:3, 1:3] * load.value .* LCS
+    # load vector in LCS (strip units from load.value - it's force/length N/m)
+    value_stripped = [to_newtons_per_meter(v) for v in load.value]
+    plocal = load.element.R[1:3, 1:3] * value_stripped .* LCS
 
     #axial end forces
     ax1 = ax2 = - dot(plocal[1], LCS[1]) * l / 2
@@ -85,8 +87,8 @@ Equivalent fixed end forces for a gravity (line) load
 function q_local(load::GravityLoad)
 
     LCS = load.element.LCS
-    l = load.element.length
-    value = [0., 0., -1.] .* load.element.section.ρ .* load.element.section.A .* load.factor
+    l = to_meters(load.element.length)
+    value = [0., 0., -1.] .* to_kg_per_m3(load.element.section.ρ) .* to_meters_squared(load.element.section.A) .* to_m_per_s2(load.factor)
 
     # load vector in LCS
     plocal = load.element.R[1:3, 1:3] * value .* LCS
@@ -119,7 +121,7 @@ end
 
 function q(load::ElementLoad{FixedFree})
     #length of element
-    factor = 3 / 2 / load.element.length
+    factor = 3 / 2 / to_meters(load.element.length)
     #fixed end components
     FAb, FSby, FSbz, FTb, FMby, FMbz, FAe, FSey, FSez, FTe, FMey, FMez = q_local(load)
 
@@ -140,7 +142,7 @@ end
 
 function q(load::ElementLoad{FreeFixed})
     #length of element
-    factor = 3 / 2 / load.element.length
+    factor = 3 / 2 / to_meters(load.element.length)
     #fixed end components
     FAb, FSby, FSbz, FTb, FMby, FMbz, FAe, FSey, FSez, FTe, FMey, FMez = q_local(load)
 
@@ -161,7 +163,7 @@ end
 
 function q(load::ElementLoad{FreeFree})
     #length of element
-    factor = 1 / load.element.length
+    factor = 1 / to_meters(load.element.length)
     #fixed end components
     FAb, FSby, FSbz, FTb, FMby, FMbz, FAe, FSey, FSez, FTe, FMey, FMez = q_local(load)
 
@@ -182,7 +184,7 @@ end
 
 function q(load::ElementLoad{Joist})
     #length of element
-    factor = 1 / load.element.length
+    factor = 1 / to_meters(load.element.length)
     #fixed end components
     FAb, FSby, FSbz, FTb, FMby, FMbz, FAe, FSey, FSez, FTe, FMey, FMez = q_local(load)
 

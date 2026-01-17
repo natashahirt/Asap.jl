@@ -1,6 +1,10 @@
 using Asap
+using StructuralUnits
 using Test
 using LinearAlgebra
+using Unitful
+
+Unitful.register(StructuralUnits)
 
 @testset "Asap.jl" begin
     #tol
@@ -8,15 +12,15 @@ using LinearAlgebra
     # 2D truss test: Example 3.9 from Kassimali "Matrix Analysis of Structures 2e"
     # in kips, ft
 
-    n1 = TrussNode([0., 0., 0.], :fixed)
-    n2 = TrussNode([10., 0., 0.], :fixed)
-    n3 = TrussNode([0., 8., 0.], :yfree)
-    n4 = TrussNode([6., 8., 0.], :free)
+    n1 = TrussNode([0.0u"m", 0.0u"m", 0.0u"m"], :fixed)
+    n2 = TrussNode([10.0u"m", 0.0u"m", 0.0u"m"], :fixed)
+    n3 = TrussNode([0.0u"m", 8.0u"m", 0.0u"m"], :yfree)
+    n4 = TrussNode([6.0u"m", 8.0u"m", 0.0u"m"], :free)
 
     nodes = [n1, n2, n3, n4]
 
-    E = 70. #kN/m^2
-    A = 4e3 / 1e6 #m^2
+    E = 70.0u"kN/m^2"  # 70 kN/m² = 70 kPa
+    A = 4e3 / 1e6 * u"m^2"  # 0.004 m²
 
     sec = TrussSection(A, E)
 
@@ -28,8 +32,8 @@ using LinearAlgebra
 
     elements = [e1,e2,e3,e4,e5]
 
-    l1 = NodeForce(n3, [0., -400., 0.])
-    l2 = NodeForce(n4, [800., -400., 0.])
+    l1 = NodeForce(n3, [0.0u"N", -400.0u"N", 0.0u"N"])
+    l2 = NodeForce(n4, [800.0u"N", -400.0u"N", 0.0u"N"])
 
     loads = [l1, l2]
 
@@ -54,16 +58,16 @@ using LinearAlgebra
     #2D frame test: Example 6.6
     # in kips, in
 
-    n1 = Node([0., 0., 0.], :fixed)
-    n2 = Node([10., 20., 0.] .* 12, :free)
-    n3 = Node([30., 20., 0.] .* 12, :fixed)
+    n1 = Node([0.0u"inch", 0.0u"inch", 0.0u"inch"], :fixed)
+    n2 = Node([10.0u"ft", 20.0u"ft", 0.0u"inch"], :free)
+    n3 = Node([30.0u"ft", 20.0u"ft", 0.0u"inch"], :fixed)
     nodes = [n1, n2, n3]
 
-    E = 29e3
-    A = 11.8
-    I = 310.
+    E = 29e3u"ksi"  # 29,000 ksi
+    A = 11.8u"inch^2"
+    I = 310.0u"inch^4"
 
-    sec = Section(A, E, 1., I, I, 1.)
+    sec = Section(A, E, 1.0u"Pa", I, I, 1.0u"inch^4")  # G is dummy, J is dummy
 
     e1 = Element(nodes[[1,2]]..., sec)
     e1.Ψ = 0.
@@ -72,9 +76,9 @@ using LinearAlgebra
 
     elements = [e1, e2]
 
-    l1 = PointLoad(e1, 0.5, [0., -90., 0.])
-    l2 = NodeMoment(n2, [0., 0., -125 * 12.])
-    l3 = LineLoad(e2, [0., -1.5/12, 0.])
+    l1 = PointLoad(e1, 0.5, [0.0u"kip", -90.0u"kip", 0.0u"kip"])
+    l2 = NodeMoment(n2, [0.0u"kip*inch", 0.0u"kip*inch", -125.0u"kip*ft"])
+    l3 = LineLoad(e2, [0.0u"kip/inch", -1.5u"kip/ft", 0.0u"kip/inch"])
 
     loads = [l1, l2, l3]
 
@@ -82,32 +86,43 @@ using LinearAlgebra
     planarize!(model)
     solve!(model)
 
-    reactions = model.reactions[model.fixedDOFs]
-    reactions = reactions[reactions .!= 0]
+    reactions_si = model.reactions[model.fixedDOFs]
+    reactions_si = reactions_si[reactions_si .!= 0]
 
-    reactions_textbook = [30.371,
-        102.09,
-        1216.,
-        -30.372,
-        17.913,
-        -854.07]
+    reactions_textbook = [30.371,  # kip
+        102.09,                     # kip
+        1216.,                      # kip*inch
+        -30.372,                    # kip
+        17.913,                     # kip
+        -854.07]                    # kip*inch
+    
+    # Convert Asap output from SI (N, N*m) back to input units (kip, kip*inch)
+    # DOF order: [Fx1, Fy1, Mz1, Fx3, Fy3, Mz3]
+    reactions_converted = [
+        ustrip(uconvert(u"kip", reactions_si[1] * u"N")),           # Fx1
+        ustrip(uconvert(u"kip", reactions_si[2] * u"N")),           # Fy1
+        ustrip(uconvert(u"kip*inch", reactions_si[3] * u"N*m")),    # Mz1
+        ustrip(uconvert(u"kip", reactions_si[4] * u"N")),           # Fx3
+        ustrip(uconvert(u"kip", reactions_si[5] * u"N")),           # Fy3
+        ustrip(uconvert(u"kip*inch", reactions_si[6] * u"N*m")),    # Mz3
+    ]
 
-    err = norm(reactions_textbook .- reactions)
+    err = norm(reactions_textbook .- reactions_converted)
 
     @test err <= tol
 
     # 3D truss test: Example 8.1
     # in kips, in
 
-    E = 10e3
-    A = 8.4
+    E = 10e3u"ksi"
+    A = 8.4u"inch^2"
     sec = TrussSection(A, E)
 
-    n1 = TrussNode([-6., 0., 8.] .* 12, :fixed)
-    n2 = TrussNode([12., 0., 8.] .* 12, :fixed)
-    n3 = TrussNode([6., 0., -8.] .* 12, :fixed)
-    n4 = TrussNode([-12., 0., -8.] .* 12, :fixed)
-    n5 = TrussNode([0., 24., 0.] .* 12, :free)
+    n1 = TrussNode([-6.0u"ft", 0.0u"inch", 8.0u"ft"], :fixed)
+    n2 = TrussNode([12.0u"ft", 0.0u"inch", 8.0u"ft"], :fixed)
+    n3 = TrussNode([6.0u"ft", 0.0u"inch", -8.0u"ft"], :fixed)
+    n4 = TrussNode([-12.0u"ft", 0.0u"inch", -8.0u"ft"], :fixed)
+    n5 = TrussNode([0.0u"inch", 24.0u"ft", 0.0u"inch"], :free)
 
     nodes = [n1, n2, n3, n4, n5]
 
@@ -118,13 +133,13 @@ using LinearAlgebra
 
     elements = [e1, e2, e3, e4]
 
-    l1 = NodeForce(n5, [0., -100., -50.])
+    l1 = NodeForce(n5, [0.0u"kip", -100.0u"kip", -50.0u"kip"])
     loads = [l1]
 
     model = TrussModel(nodes, elements, loads)
     solve!(model)
 
-    reactions = model.reactions[model.fixedDOFs]
+    reactions_si = model.reactions[model.fixedDOFs]
 
     reactions_textbook = [-5.5581,
         -22.232,
@@ -139,49 +154,57 @@ using LinearAlgebra
         47.232,
         15.744
         ]
+    
+    # Convert Asap output from SI (N) back to input units (kip)
+    reactions_converted = [ustrip(uconvert(u"kip", r * u"N")) for r in reactions_si]
 
-    err = norm(reactions_textbook .- reactions)
+    err = norm(reactions_textbook .- reactions_converted)
 
     @test err <= tol
 
     # 3D frame test: Example 8.4
-    # in kN, m
+    # in kips, inches
 
-    n1 = Node([0., 0., 0.], :free)
-    n2 = Node([-240., 0., 0.], :fixed)
-    n3 = Node([0., -240., 0.], :fixed)
-    n4 = Node([0., 0., -240.], :fixed)
+    n1 = Node([0.0u"inch", 0.0u"inch", 0.0u"inch"], :free)
+    n2 = Node([-240.0u"inch", 0.0u"inch", 0.0u"inch"], :fixed)
+    n3 = Node([0.0u"inch", -240.0u"inch", 0.0u"inch"], :fixed)
+    n4 = Node([0.0u"inch", 0.0u"inch", -240.0u"inch"], :fixed)
 
     nodes = [n1, n2, n3, n4]
 
-
-    E = 29e3
-    G = 11.5e3 
-    A = 32.9
-    Iz = 716.
-    Iy = 236.
-    J = 15.1
+    E = 29e3u"ksi"
+    G = 11.5e3u"ksi"
+    A = 32.9u"inch^2"
+    Iz = 716.0u"inch^4"
+    Iy = 236.0u"inch^4"
+    J = 15.1u"inch^4"
 
     sec = Section(A, E, G, Iz, Iy, J)
 
     e1 = Element(nodes[[2,1]]..., sec)
     e1.Ψ = 0.
     e2 = Element(nodes[[3,1]]..., sec)
-    e2.Ψ  = pi/2
+    e2.Ψ = pi/2
     e3 = Element(nodes[[4,1]]..., sec)
     e3.Ψ = pi/6
 
     elements = [e1, e2, e3]
 
-    l1 = LineLoad(e1, [0., -3/12, 0.])
-    l2 = NodeMoment(n1, [-150. * 12, 0., 150. * 12])
+    l1 = LineLoad(e1, [0.0u"kip/inch", -3.0u"kip/ft", 0.0u"kip/inch"])
+    l2 = NodeMoment(n1, [-150.0u"kip*ft", 0.0u"kip*ft", 150.0u"kip*ft"])
 
     loads = [l1, l2]
 
     model = Model(nodes, elements, loads)
     solve!(model)
 
-    reactions = model.reactions[model.fixedDOFs]
+    # Collect reactions from fixed nodes in order: n2, n3, n4
+    # Each node has 6 DOFs: [Fx, Fy, Fz, Mx, My, Mz]
+    # n1 is free, so skip it
+    reactions_quantity = Quantity[]
+    for node in [model.nodes[2], model.nodes[3], model.nodes[4]]  # n2, n3, n4 (fixed nodes)
+        append!(reactions_quantity, node.reaction)
+    end
 
     reactions_textbook = [5.3757,
         44.106,
@@ -201,8 +224,20 @@ using LinearAlgebra
         -383.5,
         -60.166,
         -4.702]
+    
+    # Convert Asap output from SI (N, N*m) back to input units (kip, kip*inch)
+    # For a 3D frame, DOF order is [Fx, Fy, Fz, Mx, My, Mz] per node
+    reactions_converted = Vector{Float64}(undef, length(reactions_quantity))
+    for i in 1:length(reactions_quantity)
+        # DOFs 4, 5, 6 (mod 6) are moments (Mx, My, Mz), rest are forces
+        if (i - 1) % 6 >= 3  # Indices 4, 5, 6 (0-indexed: 3, 4, 5) are moments
+            reactions_converted[i] = ustrip(uconvert(u"kip*inch", reactions_quantity[i]))
+        else  # Forces (Fx, Fy, Fz)
+            reactions_converted[i] = ustrip(uconvert(u"kip", reactions_quantity[i]))
+        end
+    end
 
-    err = norm(reactions_textbook .- reactions)
+    err = norm(reactions_textbook .- reactions_converted)
 
     @test err <= tol
 
@@ -210,43 +245,57 @@ using LinearAlgebra
     # from https://www.12000.org/my_notes/stiffness_matrix/stiffness_matrix_report.htm
 
     #Ex1
-    P=400.; 
-    L=144.; 
-    E=30e6; 
-    Is=57.1; 
+    P=400.0u"lbf"
+    L=144.0u"inch"
+    E=30e6u"psi"
+    Is=57.1u"inch^4"
 
-    n1 = Node([0., 0., 0.], :fixed)
-    n2 = Node([L, 0., 0.], :free)
+    n1 = Node([0.0u"inch", 0.0u"inch", 0.0u"inch"], :fixed)
+    n2 = Node([L, 0.0u"inch", 0.0u"inch"], :free)
 
     nodes = [n1, n2]
 
-    sec = Section(1., E, 1., Is, Is, 1.)
+    sec = Section(1.0u"inch^2", E, 1.0u"psi", Is, Is, 1.0u"inch^4")
 
     e = Element(nodes[[1,2]]..., sec)
     elements = [e]
 
-    p = NodeForce(n2, [0., -P, 0.])
+    p = NodeForce(n2, [0.0u"lbf", -P, 0.0u"lbf"])
     loads = [p]
 
     model = Model(nodes, elements, loads)
     planarize!(model)
     solve!(model)
 
-    d_textbook = [-.2324, -.0024]
-    d = n2.displacement[[2,6]]
+    d_textbook = [-.2324, -.0024]  # in inches and radians
+    d_si = n2.displacement[[2,6]]  # displacement in SI (m, radians) - now Unitful!
+    
+    # Convert Asap output from SI (m) back to input units (inch) for translation
+    # Rotation is already dimensionless (radians) in both
+    d_converted = [
+        ustrip(uconvert(u"inch", d_si[1])),  # Translation: m -> inch (d_si[1] is already Quantity)
+        ustrip(d_si[2])  # Rotation: already in radians (dimensionless)
+    ]
 
-    @test norm(d_textbook .- d) <= tol
+    @test norm(d_textbook .- d_converted) <= tol
 
     #Ex2
-    p = PointLoad(e, 0.5, [0., -P, 0.])
+    p = PointLoad(e, 0.5, [0.0u"lbf", -P, 0.0u"lbf"])
     loads = [p]
     
     model = Model(nodes, elements, loads)
     planarize!(model)
     solve!(model; reprocess = true)
     
-    d_textbook = [-0.072630472854641, -0.000605253940455]
-    d = n2.displacement[[2,6]]
+    d_textbook = [-0.072630472854641, -0.000605253940455]  # in inches and radians
+    d_si = n2.displacement[[2,6]]  # displacement in SI (m, radians) - now Unitful!
     
-    @test norm(d_textbook .- d) <= tol
+    # Convert Asap output from SI (m) back to input units (inch) for translation
+    # Rotation is already dimensionless (radians) in both
+    d_converted = [
+        ustrip(uconvert(u"inch", d_si[1])),  # Translation: m -> inch (d_si[1] is already Quantity)
+        ustrip(d_si[2])  # Rotation: already in radians (dimensionless)
+    ]
+    
+    @test norm(d_textbook .- d_converted) <= tol
 end

@@ -52,7 +52,7 @@ mutable struct Element{R<:Release} <: FrameElement{R}
     nodeEnd::Node #end position
     elementID::Int64
     globalID::Vector{Int64} #element global DOFs
-    length::Float64 #length of element
+    length::QuantityDistance #length of element
     K::Matrix{Float64} # stiffness matrix in GCS
     Q::Vector{Float64} # fixed end forces in GCS
     R::Matrix{Float64} # transformation matrix
@@ -71,7 +71,7 @@ mutable struct Element{R<:Release} <: FrameElement{R}
             nodeEnd,
             0,
             Vector{Int64}(undef, 12),
-            0.0,
+            0.0u"m",  # Initialize length as Quantity
             zeros(12,12),
             zeros(12),
             zeros(12,12),
@@ -150,7 +150,7 @@ mutable struct TrussElement <: AbstractElement
     nodeEnd::TrussNode #end position
     elementID::Int64
     globalID::Vector{Int64} #element global DOFs
-    length::Float64 #length of element
+    length::QuantityDistance #length of element
     K::Matrix{Float64} # stiffness matrix in GCS
     R::Matrix{Float64} # transformation matrix
     forces::Vector{Float64} #elemental forces in LCS
@@ -166,7 +166,7 @@ mutable struct TrussElement <: AbstractElement
             nodeEnd,
             0,
             Vector{Int64}(undef, 6),
-            0.0,
+            0.0u"m",  # Initialize length as Quantity
             zeros(2,2),
             zeros(2,6),
             zeros(6),

@@ -31,7 +31,7 @@ end
 Generate the [nₙ × 3] node position matrix
 """
 function node_positions(model::AbstractModel)
-    return vcat([node.position' for node in model.nodes]...)
+    return vcat([[to_meters(p) for p in node.position]' for node in model.nodes]...)
 end
 
 export nodePositions
@@ -57,7 +57,9 @@ updateDOF!(model::AbstractModel) = update_DOF!(model)
 Get the material volume of a structural model
 """
 function volume(model::AbstractModel)
-    dot(getproperty.(model.elements, :length), getproperty.(getproperty.(model.elements, :section), :A))
+    lengths = [to_meters(el.length) for el in model.elements]
+    areas = [to_meters_squared(sec.A) for sec in getproperty.(model.elements, :section)]
+    dot(lengths, areas)
 end
 
 function Base.copy(model::TrussModel)
@@ -69,7 +71,7 @@ function Base.copy(model::TrussModel)
 
     #new nodes
     for node in model.nodes
-        newnode = TrussNode(deepcopy(node.position), node.dof)
+        newnode = TrussNode(deepcopy(node.position), node.dof)  # position is already Quantity, can copy directly
         newnode.id = node.id
         push!(nodes, newnode)
     end
