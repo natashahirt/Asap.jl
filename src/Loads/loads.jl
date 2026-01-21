@@ -117,3 +117,68 @@ mutable struct PointLoad{R<:Release} <: ElementLoad{R}
         return force
     end
 end
+
+"""
+    TributaryLoad(element, positions, widths, pressure, direction)
+
+A piecewise-linear distributed load from a tributary polygon.
+
+The load intensity at each position is `widths[i] * pressure`, varying linearly between 
+breakpoints. This enables exact fixed-end force computation without discretization.
+
+## Arguments
+- `element::FrameElement`: The beam element
+- `positions::Vector{Float64}`: Breakpoint positions along beam, normalized [0, 1]
+- `widths::Vector{<:Quantity}`: Tributary widths at each position (distance units, e.g. m, ft)
+- `pressure::Quantity{Pressure}`: Load intensity (Pa or N/m²)
+- `direction::NTuple{3, Float64}`: Unit load direction vector (default gravity: (0,0,-1))
+
+## Updating
+The `pressure` field is mutable - update it and re-solve to change load magnitude
+while keeping the same tributary geometry.
+"""
+mutable struct TributaryLoad{R<:Release} <: ElementLoad{R}
+    element::FrameElement
+    positions::Vector{Float64}       # Breakpoints [0, s1, s2, ..., 1], normalized
+    widths::Vector{Length}           # Tributary widths at each position (m)
+    pressure::QuantityPressure       # Load intensity (Pa)
+    direction::NTuple{3, Float64}    # Unit load direction
+    loadID::Int64
+    id::Symbol
+
+    function TributaryLoad(
+        element::FrameElement{R},
+        positions::Vector{Float64},
+        widths::Vector{<:Quantity},
+        pressure::Quantity,
+        direction::NTuple{3, Float64} = (0.0, 0.0, -1.0),
+        id::Symbol = :tributaryload
+    ) where R
+        n = length(positions)
+        @assert n >= 2 "positions must have at least 2 elements"
+        @assert length(widths) == n "widths must have same length as positions"
+        @assert all(0.0 .<= positions .<= 1.0) "positions must be in [0, 1]"
+        @assert issorted(positions) "positions must be sorted"
+        
+        # Convert widths to meters
+        widths_si = [uconvert(u"m", w) for w in widths]
+        @assert all(ustrip.(widths_si) .>= 0.0) "widths must be non-negative"
+        
+        # Normalize direction
+        dir_len = sqrt(sum(direction .^ 2))
+        dir_norm = dir_len > 1e-12 ? direction ./ dir_len : (0.0, 0.0, -1.0)
+        
+        # Convert pressure to Pa
+        pressure_si = uconvert(u"Pa", pressure)
+        
+        load = new{R}(element, positions, widths_si, pressure_si, dir_norm, 0, id)
+        return load
+    end
+end
+
+"""Compute line load intensities (N/m) at each breakpoint."""
+function intensities(load::TributaryLoad)::Vector{Float64}
+    p = to_pascals(load.pressure)
+    w = [to_meters(width) for width in load.widths]
+    return w .* p  # width (m) × pressure (N/m²) = N/m
+end

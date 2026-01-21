@@ -3,7 +3,7 @@
 
 using Unitful
 using Unitful: lbf  # Built-in Unitful unit
-using StructuralUnits: kip, ksi  # Custom units from StructuralUnits
+using StructuralBase.StructuralUnits: kip, ksi  # Custom units from StructuralBase
 
 # =============================================================================
 # Base Unit Types (concrete type unions for input validation)
@@ -38,6 +38,9 @@ const Acceleration = Union{typeof(1.0u"m/s^2"), typeof(1.0u"ft/s^2")}
 # =============================================================================
 # Derived Unit Types (SI storage types)
 # =============================================================================
+
+"""Length in m (internal storage)."""
+const Length = typeof(1.0u"m")
 
 """Area in m² (internal storage)."""
 const Area = typeof(1.0u"m^2")

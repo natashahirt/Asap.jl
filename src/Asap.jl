@@ -2,7 +2,7 @@ module Asap
 
 using LinearAlgebra, SparseArrays
 using Unitful
-using StructuralUnits  # Shared unit definitions (lbf, kip, ksi, psf)
+using StructuralBase: StructuralUnits  # Shared unit definitions (lbf, kip, ksi, psf)
 
 # Units module (for type aliases and compatibility helpers)
 include("Units/units.jl")
@@ -49,6 +49,8 @@ export NodeMoment
 export LineLoad
 export GravityLoad
 export PointLoad
+export TributaryLoad
+export intensities
 
 include("Model/model.jl")
 include("Model/utilities.jl")
