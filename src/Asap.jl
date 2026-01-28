@@ -31,10 +31,14 @@ export fixnode!
 include("Elements/elements.jl")
 include("Elements/K.jl")
 include("Elements/R.jl")
+include("Elements/shell.jl")
 include("Elements/utilities.jl")
 export Element
 export BridgeElement
 export TrussElement
+export ShellElement
+export ShellTri3
+export ShellQuad4
 export release!
 export endpoints
 export midpoint
@@ -74,6 +78,9 @@ export node_positions
 export volume
 export to_displacement_vec
 export to_reaction_vec
+export assemble_stiffness
+export assemble_stiffness!
+export populate_globalID!
 
 # FORCE DENSITY METHOD
 include("FDM/FDM.jl")

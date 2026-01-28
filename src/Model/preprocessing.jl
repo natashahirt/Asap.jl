@@ -96,6 +96,39 @@ function process_elements!(model::TrussModel)
     end
 end
 
+# =============================================================================
+# Shell Element Processing
+# =============================================================================
+
+"""
+    populate_globalID!(elem::ShellTri3)
+
+Assign global DOF indices for a ShellTri3 element (uses translation DOFs only).
+"""
+function populate_globalID!(elem::ShellTri3)
+    elem.globalID = vcat([n.globalID[1:3] for n in elem.nodes]...)
+end
+
+"""
+    populate_globalID!(elem::ShellQuad4)
+
+Assign global DOF indices for a ShellQuad4 element (uses translation DOFs only).
+"""
+function populate_globalID!(elem::ShellQuad4)
+    elem.globalID = vcat([n.globalID[1:3] for n in elem.nodes]...)
+end
+
+"""
+    process_elements!(elements::Vector{<:ShellElement})
+
+Process a vector of shell elements: compute LCS, R, and K.
+"""
+function process_elements!(elements::Vector{T}) where {T<:ShellElement}
+    for elem in elements
+        process!(elem)
+    end
+end
+
 """
     populate_load!(model::AbstractModel, load::NodeForce)
 
@@ -240,22 +273,20 @@ function create_S!(model::Model)
     V = Vector{Float64}()
 
     for element in model.elements
-
         idx = element.globalID
-
-        for i = 1:12
-            for j = 1:12
+        n = length(idx)
+        
+        for i = 1:n
+            for j = 1:n
                 k = element.K[i,j]
                 push!(I, idx[i])
                 push!(J, idx[j])
                 push!(V, k)
-                
             end
         end
-
     end
 
-    model.S = sparse(I, J, V)
+    model.S = sparse(I, J, V, model.nDOFs, model.nDOFs)
 end
 
 """
@@ -269,20 +300,65 @@ function create_S!(model::TrussModel)
     V = Vector{Float64}()
 
     for element in model.elements
-
         idx = element.globalID
-
-        for i = 1:6
-            for j = 1:6
+        n = length(idx)
+        
+        for i = 1:n
+            for j = 1:n
                 k = element.K[i,j]
                 push!(I, idx[i])
                 push!(J, idx[j])
                 push!(V, k)
-                
             end
         end
-
     end
 
-    model.S = sparse(I, J, V)
+    model.S = sparse(I, J, V, model.nDOFs, model.nDOFs)
+end
+
+# =============================================================================
+# General Assembly Functions (for mixed element types)
+# =============================================================================
+
+"""
+    assemble_stiffness(elements, n_dof) -> SparseMatrixCSC
+
+Assemble global stiffness matrix from a vector of elements.
+Works with any element type that has `globalID` and `K` fields.
+"""
+function assemble_stiffness(elements::Vector, n_dof::Int)
+    I = Int[]
+    J = Int[]
+    V = Float64[]
+    
+    for elem in elements
+        idx = elem.globalID
+        n = length(idx)
+        
+        for i = 1:n, j = 1:n
+            push!(I, idx[i])
+            push!(J, idx[j])
+            push!(V, elem.K[i, j])
+        end
+    end
+    
+    return sparse(I, J, V, n_dof, n_dof)
+end
+
+"""
+    assemble_stiffness!(S, elements)
+
+Add element stiffness contributions to existing sparse matrix S.
+"""
+function assemble_stiffness!(S::SparseMatrixCSC, elements::Vector)
+    for elem in elements
+        idx = elem.globalID
+        n = length(idx)
+        
+        for i = 1:n, j = 1:n
+            S[idx[i], idx[j]] += elem.K[i, j]
+        end
+    end
+    
+    return S
 end

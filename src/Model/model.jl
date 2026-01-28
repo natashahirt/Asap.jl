@@ -18,6 +18,12 @@ function make_ids!(elements::Vector{<:FrameElement})
     end
 end
 
+function make_ids!(elements::Vector{<:ShellElement})
+    for (i, element) in enumerate(elements)
+        element.elementID = i
+    end
+end
+
 function make_ids!(loads::Vector{<:AbstractLoad})
     for (i, load) in enumerate(loads)
         load.loadID = i
