@@ -140,5 +140,108 @@ using Unitful
         
         @info "Frame-only baseline" u3_x u4_x
     end
+    
+    @testset "Rigid Diaphragm Coupling" begin
+        # Four columns with a floor diaphragm - load at one corner couples all
+        #
+        #  P→ 5 ●═══════● 6    (floor at z=3m)
+        #       ║       ║
+        #     7 ●═══════● 8    (floor at z=3m)
+        #
+        #     1 ●       ● 2    (base at z=0, fixed)
+        #     3 ●       ● 4    (base at z=0, fixed)
+        
+        # Base nodes (fixed)
+        n1 = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], :fixed)
+        n2 = Asap.Node([4.0u"m", 0.0u"m", 0.0u"m"], :fixed)
+        n3 = Asap.Node([0.0u"m", 4.0u"m", 0.0u"m"], :fixed)
+        n4 = Asap.Node([4.0u"m", 4.0u"m", 0.0u"m"], :fixed)
+        
+        # Top nodes (free) - at z=3m
+        n5 = Asap.Node([0.0u"m", 0.0u"m", 3.0u"m"], :free)
+        n6 = Asap.Node([4.0u"m", 0.0u"m", 3.0u"m"], :free)
+        n7 = Asap.Node([0.0u"m", 4.0u"m", 3.0u"m"], :free)
+        n8 = Asap.Node([4.0u"m", 4.0u"m", 3.0u"m"], :free)
+        
+        nodes = [n1, n2, n3, n4, n5, n6, n7, n8]
+        for (i, node) in enumerate(nodes)
+            node.nodeID = i
+            node.globalID = collect((i-1)*6+1 : i*6)
+        end
+        
+        n_dof = 48  # 8 nodes × 6 DOF
+        
+        # Four columns
+        sec = Asap.Section(0.01u"m^2", 200e9u"Pa", 77e9u"Pa", 
+                          1e-4u"m^4", 1e-4u"m^4", 1e-5u"m^4")
+        col1 = Asap.Element(n1, n5, sec, release=:fixedfixed)
+        col2 = Asap.Element(n2, n6, sec, release=:fixedfixed)
+        col3 = Asap.Element(n3, n7, sec, release=:fixedfixed)
+        col4 = Asap.Element(n4, n8, sec, release=:fixedfixed)
+        
+        # Assign frame element globalIDs
+        col1.globalID = [n1.globalID; n5.globalID]
+        col2.globalID = [n2.globalID; n6.globalID]
+        col3.globalID = [n3.globalID; n7.globalID]
+        col4.globalID = [n4.globalID; n8.globalID]
+        
+        # Process frames
+        Asap.process_elements!([col1, col2, col3, col4])
+        
+        # Rigid diaphragm shell (very high stiffness) in XY plane at z=3m
+        # Quad connecting n5-n6-n8-n7
+        rigid_shell = Asap.ShellQuad4((n5, n6, n8, n7), 0.2u"m", 1e12u"Pa", 0.001, :rigid)
+        Asap.process!(rigid_shell)
+        Asap.populate_globalID!(rigid_shell)
+        
+        # Assemble combined stiffness
+        elements = Asap.AbstractElement[col1, col2, col3, col4, rigid_shell]
+        S = Asap.assemble_stiffness(elements, n_dof)
+        
+        # Apply lateral load at node 5 (corner)
+        F = zeros(n_dof)
+        F[n5.globalID[1]] = 1000.0  # 1 kN in x-direction
+        
+        # Fixed DOFs from node definitions
+        fixed_dofs = Int[]
+        for node in nodes
+            for j in 1:6
+                if !node.dof[j]
+                    push!(fixed_dofs, node.globalID[j])
+                end
+            end
+        end
+        free_dofs = setdiff(1:n_dof, fixed_dofs)
+        
+        # Solve
+        u = zeros(n_dof)
+        K_ff = Matrix(S[free_dofs, free_dofs])
+        u[free_dofs] = K_ff \ F[free_dofs]
+        
+        # Get x-displacements of all top nodes
+        u5_x = u[n5.globalID[1]]
+        u6_x = u[n6.globalID[1]]
+        u7_x = u[n7.globalID[1]]
+        u8_x = u[n8.globalID[1]]
+        
+        # Diaphragm should couple all top nodes
+        @test u5_x > 0  # loaded node deflects
+        @test u6_x > 0  # adjacent node deflects
+        @test u7_x > 0  # side node deflects
+        @test u8_x > 0  # far corner deflects
+        
+        # Key test: nodes on same row should move together (membrane shell)
+        # Front row (5,6) should have nearly equal x-displacement
+        @test isapprox(u5_x, u6_x, rtol=0.01)  # same row coupling
+        # Back row (7,8) should also have nearly equal x-displacement
+        @test isapprox(u7_x, u8_x, rtol=0.01)  # same row coupling
+        
+        # The coupling ratio shows how much the diaphragm transfers load
+        # For stiff diaphragm, back row should deflect > 25% of front row
+        coupling_ratio = u7_x / u5_x
+        @test coupling_ratio > 0.25  # significant load transfer
+        
+        @info "Rigid diaphragm coupling" u5_x u6_x u7_x u8_x coupling_ratio
+    end
 
 end

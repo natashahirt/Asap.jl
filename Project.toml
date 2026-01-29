@@ -17,6 +17,8 @@ Unitful = "1.27.0"
 julia = "1"
 
 [extras]
+FinEtools = "91b48084-e73f-5aac-a89a-007e631e1619"
+FinEtoolsFlexStructures = "04cfd9f0-7cb3-4186-b64a-92978a10e4c5"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]

@@ -475,3 +475,4 @@ function stress(elem::ShellTri3, u_global::Vector{Float64})
     σ = D * ε  # [σxx, σyy, τxy] in Pa
     return σ
 end
+

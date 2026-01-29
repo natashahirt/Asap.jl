@@ -1,5 +1,5 @@
 using Asap
-using StructuralUnits
+using StructuralBase: StructuralUnits
 using Test
 using Unitful
 
