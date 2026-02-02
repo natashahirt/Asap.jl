@@ -1,7 +1,7 @@
 name = "Asap"
 uuid = "763a8c06-ba23-41fc-b385-b3b57b52403a"
-authors = ["Keith JL"]
 version = "0.2.2"
+authors = ["Keith JL"]
 
 [deps]
 DelaunayTriangulation = "927a84f5-c5f4-47a5-9785-b46e178433df"
@@ -13,7 +13,7 @@ StructuralBase = "7e8f2a1b-4c3d-5e6f-9a0b-1c2d3e4f5a6b"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [sources]
-StructuralBase = {path = "../../StructuralBase"}
+StructuralBase = {path = "..\\..\\StructuralBase"}
 
 [compat]
 DelaunayTriangulation = "1"
