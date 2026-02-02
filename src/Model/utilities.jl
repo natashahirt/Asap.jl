@@ -3,7 +3,7 @@
 
 Fix all nodal DOFs to remain on plane = `plane`
 """
-function planarize!(model::AbstractModel, plane = :XY)
+function planarize!(model::FrameModel, plane = :XY)
     planarize!(model.nodes, plane)
     if plane == :XY
         for element in model.elements
@@ -12,16 +12,53 @@ function planarize!(model::AbstractModel, plane = :XY)
     end
 end
 
+function planarize!(model::Model, plane = :XY)
+    planarize!(model.nodes, plane)
+    if plane == :XY
+        for element in model.frame_elements
+            element.Ψ = 0.
+        end
+    end
+end
+
+function planarize!(model::ShellModel, plane = :XY)
+    planarize!(model.nodes, plane)
+end
+
+function planarize!(model::TrussModel, plane = :XY)
+    planarize!(model.nodes, plane)
+end
+
 """
     connectivity(model::AbstractModel)
 
-Get the [nₑ × nₙ] sparse matrix where C[i, j] = -1 if element i starts at node j, and C[i,j] = 1 if element i ends at node j, and 0 otherwise.
+Get the [nₑ × nₙ] sparse matrix where C[i, j] = -1 if element i starts at node j, 
+and C[i,j] = 1 if element i ends at node j, and 0 otherwise.
+
+Only works for frame/truss models with 2-node elements.
 """
-function connectivity(model::AbstractModel)
+function connectivity(model::FrameModel)
     I = vcat([[i, i] for i = 1:model.nElements]...)
     J = vcat([nodeids(e) for e in model.elements]...)
     V = repeat([-1, 1], model.nElements)
+    return sparse(I, J, V)
+end
 
+function connectivity(model::Model)
+    if isempty(model.frame_elements)
+        error("connectivity() only works for frame elements")
+    end
+    n_elem = model.nFrameElements
+    I = vcat([[i, i] for i = 1:n_elem]...)
+    J = vcat([nodeids(e) for e in model.frame_elements]...)
+    V = repeat([-1, 1], n_elem)
+    return sparse(I, J, V)
+end
+
+function connectivity(model::TrussModel)
+    I = vcat([[i, i] for i = 1:model.nElements]...)
+    J = vcat([nodeids(e) for e in model.elements]...)
+    V = repeat([-1, 1], model.nElements)
     return sparse(I, J, V)
 end
 
@@ -54,9 +91,41 @@ updateDOF!(model::AbstractModel) = update_DOF!(model)
 """
     volume(model::AbstractModel)
 
-Get the material volume of a structural model
+Get the material volume of a structural model.
 """
-function volume(model::AbstractModel)
+function volume(model::FrameModel)
+    lengths = [to_meters(el.length) for el in model.elements]
+    areas = [to_meters_squared(sec.A) for sec in getproperty.(model.elements, :section)]
+    dot(lengths, areas)
+end
+
+function volume(model::Model)
+    vol = 0.0
+    
+    # Frame elements
+    if !isempty(model.frame_elements)
+        lengths = [to_meters(el.length) for el in model.frame_elements]
+        areas = [to_meters_squared(sec.A) for sec in getproperty.(model.frame_elements, :section)]
+        vol += dot(lengths, areas)
+    end
+    
+    # Shell elements
+    for elem in model.shell_elements
+        vol += elem.area * elem.thickness
+    end
+    
+    return vol
+end
+
+function volume(model::ShellModel)
+    vol = 0.0
+    for elem in model.elements
+        vol += elem.area * elem.thickness
+    end
+    return vol
+end
+
+function volume(model::TrussModel)
     lengths = [to_meters(el.length) for el in model.elements]
     areas = [to_meters_squared(sec.A) for sec in getproperty.(model.elements, :section)]
     dot(lengths, areas)
@@ -71,7 +140,7 @@ function Base.copy(model::TrussModel)
 
     #new nodes
     for node in model.nodes
-        newnode = TrussNode(deepcopy(node.position), node.dof)  # position is already Quantity, can copy directly
+        newnode = TrussNode(deepcopy(node.position), node.dof)
         newnode.id = node.id
         push!(nodes, newnode)
     end
@@ -94,5 +163,4 @@ function Base.copy(model::TrussModel)
     solve!(model)
 
     return model
-
 end

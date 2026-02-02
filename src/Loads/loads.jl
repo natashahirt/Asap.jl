@@ -182,3 +182,204 @@ function intensities(load::TributaryLoad)::Vector{Float64}
     w = [to_meters(width) for width in load.widths]
     return w .* p  # width (m) × pressure (N/m²) = N/m
 end
+
+# =============================================================================
+# Area Loads (Pressure on Shell Elements)
+# =============================================================================
+
+"""
+    AreaLoad(shells, pressure; distribute_to=:nodes, interior_beams=[], axis=nothing, direction=(0,0,-1))
+
+A uniform pressure load over shell element surfaces.
+
+Completes the load type progression: `PointLoad` → `LineLoad` → `AreaLoad`
+
+# Arguments
+- `shells`: Shell elements defining the loaded area
+  - Single element: `ShellTri3`
+  - Multiple elements: `Vector{<:ShellElement}`
+- `pressure::Quantity{Pressure}`: Load intensity (Pa or N/m²)
+
+# Keywords
+- `distribute_to`: How load is distributed
+  - `:nodes` (default): FEM approach - equivalent nodal forces on shell nodes
+  - `Vector{FrameElement}`: Tributary approach - distribute to supporting beams/columns
+- `interior_beams`: Interior beams that split the slab region (for tributary distribution)
+  - These beams receive tributary load from both sides
+  - Only used when `distribute_to` is a beam vector
+- `axis`: For tributary distribution, controls one-way vs two-way
+  - `nothing` (default): Two-way isotropic (straight skeleton)
+  - `(1.0, 0.0)`: One-way along X (load to Y-perpendicular edges)
+  - `(0.0, 1.0)`: One-way along Y (load to X-perpendicular edges)
+- `direction::NTuple{3, Float64}`: Load direction vector (default: gravity)
+
+# Examples
+```julia
+# FEM approach: forces at shell nodes (for shell analysis)
+load = AreaLoad(shells, 5000u"Pa")
+
+# Tributary to edge beams only
+load = AreaLoad(shells, 5000u"Pa"; distribute_to=edge_beams)
+
+# Tributary to edge + interior beams (interior beams get load from both sides)
+load = AreaLoad(shells, 5000u"Pa"; 
+    distribute_to=vcat(edge_beams, interior_beam),
+    interior_beams=[interior_beam]
+)
+
+# One-way slab spanning along X
+load = AreaLoad(shells, 5000u"Pa"; distribute_to=beams, axis=(1.0, 0.0))
+```
+"""
+mutable struct AreaLoad <: AbstractLoad
+    shells::Vector{<:ShellElement}
+    pressure::QuantityPressure
+    direction::NTuple{3, Float64}
+    distribute_to::Union{Symbol, Vector{<:FrameElement}}
+    interior_beams::Vector{<:FrameElement}
+    axis::Union{Nothing, NTuple{2, Float64}}
+    loadID::Int64
+    id::Symbol
+    
+    # Internal: cached tributary loads (computed lazily during process!)
+    _tributary_loads::Union{Nothing, Vector{TributaryLoad}}
+
+    function AreaLoad(
+        shells::Vector{S},
+        pressure::Quantity;
+        distribute_to::Union{Symbol, Vector{<:FrameElement}} = :nodes,
+        interior_beams::Vector{<:FrameElement} = FrameElement[],
+        axis::Union{Nothing, NTuple{2, <:Real}, Vector{<:Real}} = nothing,
+        direction::NTuple{3, Float64} = (0.0, 0.0, -1.0),
+        id::Symbol = :areaload
+    ) where S <: ShellElement
+        # Normalize direction
+        dir_len = sqrt(sum(direction .^ 2))
+        dir_norm = dir_len > 1e-12 ? direction ./ dir_len : (0.0, 0.0, -1.0)
+        
+        # Convert pressure to Pa
+        pressure_si = uconvert(u"Pa", pressure)
+        
+        # Normalize axis to tuple
+        axis_tuple = if isnothing(axis)
+            nothing
+        elseif axis isa Vector
+            (Float64(axis[1]), Float64(axis[2]))
+        else
+            (Float64(axis[1]), Float64(axis[2]))
+        end
+        
+        new(shells, pressure_si, dir_norm, distribute_to, interior_beams, axis_tuple, 0, id, nothing)
+    end
+end
+
+# Convenience: single shell element
+function AreaLoad(
+    shell::ShellElement,
+    pressure::Quantity;
+    kwargs...
+)
+    AreaLoad([shell], pressure; kwargs...)
+end
+
+"""
+    nodal_forces(load::AreaLoad) -> Vector{Tuple{Node, Vector{Float64}}}
+
+Compute equivalent nodal forces for an area load (FEM distribution).
+Only used when distribute_to=:nodes.
+"""
+function nodal_forces(load::AreaLoad)
+    load.distribute_to != :nodes && error("nodal_forces only valid for distribute_to=:nodes")
+    
+    p = ustrip(u"Pa", load.pressure)
+    results = Tuple{Node, Vector{Float64}}[]
+    
+    for shell in load.shells
+        area = shell.area
+        total_force = p * area
+        n_nodes = length(shell.nodes)
+        force_per_node = total_force / n_nodes
+        fvec = [force_per_node * d for d in load.direction]
+        
+        for node in shell.nodes
+            push!(results, (node, fvec))
+        end
+    end
+    
+    return results
+end
+
+# =============================================================================
+# Shell Self-Weight
+# =============================================================================
+
+"""
+    SelfWeight(shells; g=9.81u"m/s^2")
+    SelfWeight(shells, g)
+
+Create an AreaLoad representing the self-weight of shell elements.
+
+Computes pressure from shell properties: `p = ρ × t × g`
+
+# Arguments
+- `shells`: Shell elements (must have ρ defined)
+- `g`: Gravitational acceleration (default: 9.81 m/s²)
+
+# Example
+```julia
+section = ShellSection(0.15u"m", 30u"GPa", 0.2; ρ=2400u"kg/m^3")
+shells = Shell(corners, section)
+
+# Self-weight load
+sw = SelfWeight(shells)
+
+# Or with custom g
+sw = SelfWeight(shells; g=10u"m/s^2")
+```
+"""
+function SelfWeight(
+    shells::Vector{<:ShellElement};
+    g::Quantity = 9.81u"m/s^2",
+    id::Symbol = :selfweight
+)
+    isempty(shells) && error("SelfWeight requires at least one shell element")
+    
+    # Get thickness and density from first shell (assume uniform)
+    first_shell = shells[1]
+    t = first_shell.thickness  # meters (Float64)
+    ρ = first_shell.ρ          # kg/m³ (Float64)
+    
+    # Compute self-weight pressure: p = ρ * t * g
+    g_val = ustrip(u"m/s^2", g)
+    pressure = ρ * t * g_val  # (kg/m³) * m * (m/s²) = kg/(m·s²) = Pa
+    
+    AreaLoad(shells, pressure * u"Pa"; direction=(0.0, 0.0, -1.0), id=id)
+end
+
+# Convenience: single shell
+function SelfWeight(shell::ShellElement; kwargs...)
+    SelfWeight([shell]; kwargs...)
+end
+
+# =============================================================================
+# Backward Compatibility: SurfaceLoad alias
+# =============================================================================
+
+"""
+    SurfaceLoad(element, pressure, direction)
+
+DEPRECATED: Use `AreaLoad` instead.
+
+Alias for backward compatibility. Creates an AreaLoad with distribute_to=:nodes.
+"""
+function SurfaceLoad(
+    element::ShellElement,
+    pressure::Quantity,
+    direction::NTuple{3, Float64} = (0.0, 0.0, -1.0),
+    id::Symbol = :surfaceload
+)
+    AreaLoad([element], pressure; direction=direction, distribute_to=:nodes, id=id)
+end
+
+# populate_load! for AreaLoad is defined in Model/preprocessing.jl
+# to avoid circular dependency (loads.jl is included before model.jl)
