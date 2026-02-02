@@ -227,6 +227,118 @@ function solve_buckling!(model::TrussModel; n::Int = 6)
     return BucklingResult(eigvals, mode_shapes, n_modes)
 end
 
+"""
+    solve_buckling!(model::ShellModel; n=6) -> BucklingResult
+
+Perform linear buckling analysis for shell structures.
+
+Solves the eigenvalue problem: (K + λ·Kg)φ = 0
+
+# Shell Buckling Physics
+For plates and shells under membrane (in-plane) forces:
+- Compression forces cause destabilization → positive eigenvalues
+- Tension forces add stiffness → negative eigenvalues (stable)
+
+The critical buckling load for a simply supported square plate is:
+    Ncr = k·π²·D/b² where D = Et³/12(1-ν²), k=4 for uniaxial compression
+
+# Example
+```julia
+# Simply supported plate under edge compression
+model = ShellModel(nodes, shells, [EdgeForce(...)])
+result = solve_buckling!(model; n=4)
+
+if result.load_factors[1] < 1.0
+    println("Plate will buckle before reaching applied load")
+end
+```
+"""
+function solve_buckling!(model::ShellModel; n::Int = 6)
+    if !model.processed
+        process!(model)
+    end
+    
+    solve!(model)
+    
+    K = model.S
+    Kg = assemble_geometric_stiffness(model)
+    
+    idx = model.freeDOFs
+    n_free = length(idx)
+    
+    if n_free == 0
+        error("No free DOFs - cannot perform buckling analysis")
+    end
+    
+    n = min(n, n_free)
+    
+    K_ff = Matrix(K[idx, idx])
+    Kg_ff = Matrix(Kg[idx, idx])
+    
+    eigvals, mode_shapes, n_modes = _solve_buckling_eigen(K_ff, Kg_ff, n, model.nDOFs, idx)
+    
+    return BucklingResult(eigvals, mode_shapes, n_modes)
+end
+
+"""
+    solve_buckling!(model::ShellModel, σ_uniform::Vector{Float64}; n=6) -> BucklingResult
+
+Perform linear buckling analysis with prescribed uniform membrane forces.
+
+This is useful for validation against analytical solutions where you know
+the stress state (e.g., uniform compression).
+
+# Arguments
+- `model::ShellModel`: Processed shell model (must have BCs applied via node.dof)
+- `σ_uniform::Vector{Float64}`: [Nxx, Nyy, Nxy] membrane forces [N/m]
+  - Nxx < 0 for compression in x
+  - Nyy < 0 for compression in y
+- `n::Int`: Number of buckling modes to compute (default: 6)
+
+# Returns
+- `BucklingResult`: Contains load factors, mode shapes, and summary methods
+
+# Example
+```julia
+# Simply supported square plate under uniform uniaxial compression
+# Analytical Ncr = 4π²D/a² for square plate
+
+D = E * t^3 / (12 * (1 - ν^2))
+Ncr_analytical = 4 * π^2 * D / a^2
+
+# Apply unit compression and find load factor
+σ_unit = [-1.0, 0.0, 0.0]  # Unit compression in x
+result = solve_buckling!(model, σ_unit; n=4)
+
+# Critical load is λ * |σ_unit|
+Ncr_computed = result.load_factors[1] * 1.0
+```
+"""
+function solve_buckling!(model::ShellModel, σ_uniform::Vector{Float64}; n::Int = 6)
+    if !model.processed
+        process!(model)
+    end
+    
+    K = model.S
+    Kg = assemble_geometric_stiffness(model, σ_uniform)
+    
+    idx = model.freeDOFs
+    n_free = length(idx)
+    
+    if n_free == 0
+        error("No free DOFs - cannot perform buckling analysis")
+    end
+    
+    n = min(n, n_free)
+    
+    K_ff = Matrix(K[idx, idx])
+    Kg_ff = Matrix(Kg[idx, idx])
+    
+    eigvals, mode_shapes, n_modes = _solve_buckling_eigen(K_ff, Kg_ff, n, model.nDOFs, idx)
+    
+    return BucklingResult(eigvals, mode_shapes, n_modes)
+end
+
 # =============================================================================
 # Utility Functions
 # =============================================================================
@@ -236,7 +348,7 @@ end
 
 Convenience function to get just the first (most critical) buckling load factor.
 """
-function critical_load_factor(model::Union{FrameModel, Model, TrussModel})
+function critical_load_factor(model::Union{FrameModel, Model, TrussModel, ShellModel})
     result = solve_buckling!(model; n=1)
     return result.n_modes > 0 ? result.load_factors[1] : Inf
 end
@@ -246,6 +358,6 @@ end
 
 Check if structure is stable under current loading (λ_cr > 1.0).
 """
-function is_stable(model::Union{FrameModel, Model, TrussModel})
+function is_stable(model::Union{FrameModel, Model, TrussModel, ShellModel})
     return critical_load_factor(model) > 1.0
 end

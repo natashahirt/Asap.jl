@@ -1,5 +1,3 @@
-[![DOI](https://zenodo.org/badge/426740094.svg)](https://zenodo.org/doi/10.5281/zenodo.10581559)
-
 ![](READMEassets/forces-axo.png)
 
 # Asap.jl
@@ -23,7 +21,7 @@ This is an extended fork of the [original Asap.jl](https://github.com/keithjlee/
 - **Composite shells** - Laminated composite materials with ply-level stress recovery
 - **Grounded springs** - Elastic foundation/support modeling
 - **Modal analysis** - Natural frequencies and mode shapes
-- **Nonlinear analysis** - P-delta, linear buckling, Newton-Raphson pushover
+- **Nonlinear analysis** - P-delta, linear buckling (frames + shells), Newton-Raphson pushover
 - **Unified solve! API** - Single entry point with symbol dispatch: `solve!(model, :buckling)`
 - **Mixed models** - Combined frame + shell structures in one model
 - **Tributary areas** - Straight skeleton and Voronoi algorithms for load distribution
@@ -730,7 +728,7 @@ solve!(model, :all)                    # All valid for this model → NamedTuple
 
 ```julia
 available_analyses(frame_model)  # → (:static, :modal, :buckling, :pdelta, :nonlinear)
-available_analyses(shell_model)  # → (:static, :modal)
+available_analyses(shell_model)  # → (:static, :modal, :buckling)
 available_analyses(truss_model)  # → (:static, :buckling)
 ```
 
@@ -1119,32 +1117,9 @@ nodes[3].position
 
 **Shell Formulations**: Based on [FinEtoolsFlexStructures.jl](https://github.com/PetrKryslUCSD/FinEtoolsFlexStructures.jl) by Petr Krysl (MIT License). The T3FF shell element with DSG shear technology is adapted from his work.
 
+**Shell Buckling**: The shell geometric stiffness formulation references [FEniCSx-Shells](https://github.com/FEniCS-Shells/fenicsx-shells) by the FEniCS-Shells authors (LGPL License). The nonlinear Naghdi shell demo provided mathematical guidance for the membrane stress → geometric stiffness derivation.
+
 **Dependencies**: This package builds on [Unitful.jl](https://github.com/PainterQubits/Unitful.jl), [Meshes.jl](https://github.com/JuliaGeometry/Meshes.jl), and [DelaunayTriangulation.jl](https://github.com/DanielVandH/DelaunayTriangulation.jl).
-
----
-
-# Citing
-
-When using or extending this software for research purposes, please cite:
-
-### Bibtex
-
-```
-@software{lee_2024_10581560,
-  author       = {Lee, Keith Janghyun},
-  title        = {Asap.jl},
-  month        = jan,
-  year         = 2024,
-  publisher    = {Zenodo},
-  version      = {v0.1},
-  doi          = {10.5281/zenodo.10581560},
-  url          = {https://doi.org/10.5281/zenodo.10581560}
-}
-```
-
-### APA
-
-Lee, K. J. (2024). Asap.jl (v0.1). Zenodo. https://doi.org/10.5281/zenodo.10581560
 
 ---
 
