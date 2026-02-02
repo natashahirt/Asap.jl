@@ -1117,7 +1117,7 @@ nodes[3].position
 
 **Shell Formulations**: Based on [FinEtoolsFlexStructures.jl](https://github.com/PetrKryslUCSD/FinEtoolsFlexStructures.jl) by Petr Krysl (MIT License). The T3FF shell element with DSG shear technology is adapted from his work.
 
-**Shell Buckling**: The shell geometric stiffness formulation references [FEniCSx-Shells](https://github.com/FEniCS-Shells/fenicsx-shells) by the FEniCS-Shells authors (LGPL License). The nonlinear Naghdi shell demo provided mathematical guidance for the membrane stress → geometric stiffness derivation.
+**Shell Buckling**: The shell geometric stiffness implementation follows classical plate theory (Cook et al., Przemieniecki). The [FEniCSx-Shells](https://github.com/FEniCS-Shells/fenicsx-shells) nonlinear Naghdi demo was a helpful reference for understanding shell strain measures.
 
 **Dependencies**: This package builds on [Unitful.jl](https://github.com/PainterQubits/Unitful.jl), [Meshes.jl](https://github.com/JuliaGeometry/Meshes.jl), and [DelaunayTriangulation.jl](https://github.com/DanielVandH/DelaunayTriangulation.jl).
 
