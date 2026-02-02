@@ -24,15 +24,18 @@ using LinearAlgebra
         end
         
         @testset "From ShellMaterial" begin
-            mat = ShellMaterial(E=30u"GPa", ν=0.2, ρ=2400u"kg/m^3", name=:concrete)
+            mat = Asap.ShellMaterial(E=30u"GPa", ν=0.2, ρ=2400u"kg/m^3", name=:concrete)
             sec = ShellSection(0.2u"m", mat)
             @test sec.thickness ≈ 0.2
             @test sec.E ≈ 30e9
         end
         
-        @testset "Presets" begin
-            @test Concrete_ShellSection_150mm.thickness ≈ 0.15
-            @test Concrete_ShellSection_200mm.thickness ≈ 0.20
+        @testset "Inline Section Creation" begin
+            # Presets removed - create sections inline
+            sec_150 = ShellSection(0.15u"m", 30u"GPa", 0.2; ρ=2400u"kg/m^3", name=:concrete_150mm)
+            sec_200 = ShellSection(0.20u"m", 30u"GPa", 0.2; ρ=2400u"kg/m^3", name=:concrete_200mm)
+            @test sec_150.thickness ≈ 0.15
+            @test sec_200.thickness ≈ 0.20
         end
     end
     

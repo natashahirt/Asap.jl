@@ -27,7 +27,48 @@ This is an extended fork of the [original Asap.jl](https://github.com/keithjlee/
 - **Tributary areas** - Straight skeleton and Voronoi algorithms for load distribution
 - **Area loads** - Unified surface pressure API for shells
 - **Shell queries** - Spatial queries and region integration for design strips
-- **Force Density Method** - Form-finding for cable/membrane structures
+- **Unit system** - Canonical source for structural engineering units (see below)
+
+### Unit System (Canonical Source)
+
+Asap is the **canonical source** for structural engineering units in the ecosystem. Other packages (`StructuralSizer`, `StructuralSynthesizer`) import and re-export units from here.
+
+**US Customary Units:**
+| Unit | Symbol | Definition |
+|------|--------|------------|
+| `kip` | kip | 1000 lbf (kilopound-force) |
+| `ksi` | ksi | 1000 psi (kips per square inch) |
+| `psf` | psf | lbf/ft² (pounds per square foot) |
+| `ksf` | ksf | 1000 psf (kips per square foot) |
+| `pcf` | pcf | lb/ft³ (pounds per cubic foot) |
+
+**Type Aliases (for function signatures):**
+- `Length`, `Area`, `Volume` - Geometric quantities
+- `Pressure`, `Force`, `Moment`, `Torque` - Mechanical quantities
+- `LinearLoad`, `Density`, `Acceleration` - Derived quantities
+- `SecondMomentOfArea`, `TorsionalConstant`, `WarpingConstant` - Section properties
+
+**Conversion Helpers:**
+```julia
+to_ksi(50u"MPa")      # → 7.252 (Float64 in ksi)
+to_inches(1u"m")      # → 39.37 (Float64 in inches)
+to_meters(12u"ft")    # → 3.658 (Float64 in meters)
+to_kip(100u"kN")      # → 22.48 (Float64 in kip)
+```
+
+**Usage:**
+```julia
+using Asap
+using Unitful
+
+# Register units for u"..." string macro
+Unitful.register(Asap)
+
+# Now you can use:
+load = 100u"psf"
+stress = 50u"ksi"
+length = 30u"ft"
+```
 
 ### Installation
 
@@ -338,12 +379,10 @@ section = TrussSection(0.01u"m^2", 200u"GPa")
 Material definition for shells. Iteration-friendly for parametric studies.
 
 ```julia
+# Create materials inline
 concrete = ShellMaterial(E=30u"GPa", ν=0.2, ρ=2400u"kg/m^3", name=:concrete)
 steel = ShellMaterial(E=200u"GPa", ν=0.3, ρ=7850u"kg/m^3", name=:steel)
-
-# Built-in presets
-Concrete_Shell  # 30 GPa, ν=0.2, ρ=2400 kg/m³
-Steel_Shell     # 200 GPa, ν=0.3, ρ=7850 kg/m³
+aluminum = ShellMaterial(E=70u"GPa", ν=0.33, ρ=2700u"kg/m^3", name=:aluminum)
 
 # Easy iteration
 for mat in [concrete, steel, aluminum]
@@ -432,9 +471,9 @@ section = ShellSection(0.15u"m", 30u"GPa", 0.2; ρ=2400u"kg/m^3", name=:concrete
 concrete = ShellMaterial(E=30u"GPa", ν=0.2, ρ=2400u"kg/m^3")
 section = ShellSection(0.15u"m", concrete)
 
-# Built-in presets
-Concrete_ShellSection_150mm  # 150mm concrete slab
-Concrete_ShellSection_200mm  # 200mm concrete slab
+# Or create sections directly
+section_150mm = ShellSection(0.15u"m", 30u"GPa", 0.2; ρ=2400u"kg/m^3")
+section_200mm = ShellSection(0.20u"m", 30u"GPa", 0.2; ρ=2400u"kg/m^3")
 ```
 
 ### `Shell()` - Create Shell Elements
@@ -444,11 +483,11 @@ Automatically triangulate any polygon into `ShellTri3` elements. Works with tria
 ```julia
 section = ShellSection(0.15u"m", 30u"GPa", 0.2; ρ=2400u"kg/m^3")
 
-# Simple - uses default n=4 refinement (~5% accuracy)
+# Default refinement (n=4)
 shells = Shell((n1, n2, n3, n4), section)
 
-# Custom refinement (n=6 gives ~1% accuracy)
-shells = Shell((n1, n2, n3, n4), 6, section)
+# Finer mesh for higher accuracy
+shells = Shell((n1, n2, n3, n4), 8, section)
 
 # Custom element ID
 shells = Shell(corners, section; id=:floor_slab)
@@ -1079,34 +1118,6 @@ column_tribs = compute_voronoi_tributaries(floor_polygon, column_points)
 span_info = get_polygon_span(vertices)
 Ln = short_span(span_info)
 Ll = long_span(span_info)
-```
-
----
-
-# Force Density Method
-
-Form-finding for cable and membrane structures.
-
-```julia
-# Define network
-nodes = [
-    FDMnode(0, 0, 0, false),  # Fixed
-    FDMnode(10, 0, 0, false), # Fixed
-    FDMnode(5, 5, 0, true),   # Free (will find form)
-]
-
-elements = [
-    FDMelement(nodes, 1, 3, 1.0),  # q = force density
-    FDMelement(nodes, 2, 3, 1.0),
-]
-
-loads = [FDMload(nodes[3], [0, 0, -100])]
-
-network = Network(nodes, elements, loads)
-solve!(network)
-
-# Free node position after form-finding
-nodes[3].position
 ```
 
 ---

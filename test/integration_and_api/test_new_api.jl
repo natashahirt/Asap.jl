@@ -32,16 +32,19 @@ using LinearAlgebra
             @test mat_ksi.E ≈ ustrip(u"Pa", 4000u"ksi") rtol=1e-6
         end
         
-        @testset "Built-in Presets" begin
-            @test Concrete_Shell.name == :concrete
-            @test Concrete_Shell.E ≈ 30e9
-            @test Concrete_Shell.ν ≈ 0.2
-            @test Concrete_Shell.ρ ≈ 2400.0
+        @testset "Inline Material Creation" begin
+            # Presets removed - materials created inline
+            concrete = ShellMaterial(E=30u"GPa", ν=0.2, ρ=2400u"kg/m^3", name=:concrete)
+            @test concrete.name == :concrete
+            @test concrete.E ≈ 30e9
+            @test concrete.ν ≈ 0.2
+            @test concrete.ρ ≈ 2400.0
             
-            @test Steel_Shell.name == :steel
-            @test Steel_Shell.E ≈ 200e9
-            @test Steel_Shell.ν ≈ 0.3
-            @test Steel_Shell.ρ ≈ 7850.0
+            steel = ShellMaterial(E=200u"GPa", ν=0.3, ρ=7850u"kg/m^3", name=:steel)
+            @test steel.name == :steel
+            @test steel.E ≈ 200e9
+            @test steel.ν ≈ 0.3
+            @test steel.ρ ≈ 7850.0
         end
         
         @testset "Invalid Poisson Ratio" begin

@@ -29,9 +29,8 @@ struct Material
     end
 end
 
-# Constants with explicit units
-const Steel_Nmm = Material(200e3u"N/mm^2", 77e3u"N/mm^2", 7850.0u"kg/m^3", 0.3)
-const Steel_kNm = Material(200e6u"N/m^2", 77e6u"N/m^2", 7850.0u"kg/m^3", 0.3)
+# Note: Material presets removed. Use StructuralSizer materials with to_asap_section().
+# Example: to_asap_section(section, A992_Steel) converts to Asap.Section
 
 # =============================================================================
 # ShellMaterial - Simplified material for shell elements
@@ -85,6 +84,5 @@ struct ShellMaterial
     end
 end
 
-# Common shell materials
-const Concrete_Shell = ShellMaterial(E=30u"GPa", ν=0.2, ρ=2400u"kg/m^3", name=:concrete)
-const Steel_Shell = ShellMaterial(E=200u"GPa", ν=0.3, ρ=7850u"kg/m^3", name=:steel)
+# Note: ShellMaterial presets removed. Create materials inline or use StructuralSizer materials.
+# Example: ShellMaterial(E=30u"GPa", ν=0.2, ρ=2400u"kg/m^3", name=:concrete)

@@ -37,7 +37,7 @@ abstract type ShellElement <: AbstractElement end
 # =============================================================================
 
 """
-    ShellTri3(nodes, thickness, E, ν; id=:shell, ρ=0.0)
+    ShellTri3(nodes, thickness, E, ν; id=:shell, ρ=0.0, κ=5/6, drilling_scale=1.0, shear_stab=5/18)
 
 A 3-node triangular shell element with full membrane, bending, and transverse shear stiffness.
 
@@ -53,6 +53,24 @@ Suitable for flat or nearly-flat shell structures, plates, and slabs.
 # Optional
 - `id::Symbol`: Element identifier (default: `:shell`)
 - `ρ::Real`: Mass density in kg/m³ (default: 0.0)
+- `κ::Real`: Shear correction factor (default: 5/6 ≈ 0.833 for rectangular sections)
+- `drilling_scale::Real`: Drilling DOF stabilization scale (default: 1.0)
+- `shear_stab::Real`: Lyly-Stenberg-Vihinen shear stabilization factor (default: 5/18 ≈ 0.278)
+
+# Formulation Parameters
+
+**Shear correction factor (κ)**: Accounts for non-uniform shear stress distribution through 
+thickness. Standard value 5/6 is for rectangular cross-sections. Use:
+- κ = 5/6 (≈0.833): Rectangular sections (default)
+- κ = 0.9: Parabolic shear distribution approximation
+- κ = 1.0: No correction (conservative for thin shells)
+
+**Drilling scale**: Scales the artificial drilling DOF (θz) stiffness relative to average
+bending stiffness. Values 0.1–1.0 are typical. Set to 0.0 to disable (not recommended).
+
+**Shear stabilization (shear_stab)**: Controls the Lyly-Stenberg-Vihinen transverse shear 
+stabilization. Factor appears as: t³/(t² + shear_stab·h²) where h² ≈ 2·Area.
+Standard value 5/18 from [Lyly, Stenberg, Vihinen 1993].
 
 # Example
 ```julia
@@ -60,7 +78,11 @@ n1 = Node([0.0u"m", 0.0u"m", 0.0u"m"], :free)
 n2 = Node([1.0u"m", 0.0u"m", 0.0u"m"], :free)
 n3 = Node([0.5u"m", 1.0u"m", 0.0u"m"], :free)
 
-shell = ShellTri3((n1, n2, n3), 0.2u"m", 30e9u"Pa", 0.2)  # 200mm thick concrete
+# Default parameters
+shell = ShellTri3((n1, n2, n3), 0.2u"m", 30e9u"Pa", 0.2)
+
+# Custom parameters for thick shell
+shell = ShellTri3((n1, n2, n3), 0.5u"m", 30e9u"Pa", 0.2; κ=0.9, drilling_scale=0.5)
 ```
 
 # Mathematical Formulation
@@ -78,6 +100,9 @@ mutable struct ShellTri3 <: ShellElement
     E::Float64                  # [Pa]
     ν::Float64                  # [-]
     ρ::Float64                  # [kg/m³]
+    κ::Float64                  # Shear correction factor
+    drilling_scale::Float64     # Drilling DOF stabilization scale
+    shear_stab::Float64         # Shear stabilization factor
     elementID::Int64
     globalID::Vector{Int64}     # 18 DOFs
     area::Float64               # [m²]
@@ -94,9 +119,15 @@ mutable struct ShellTri3 <: ShellElement
         E::Quantity,
         ν::Real;
         id::Symbol = :shell,
-        ρ::Real = 0.0
+        ρ::Real = 0.0,
+        κ::Real = 5.0/6.0,
+        drilling_scale::Real = 1.0,
+        shear_stab::Real = 5.0/18.0
     )
         @assert 0.0 <= ν < 0.5 "Poisson's ratio must be in [0, 0.5)"
+        @assert 0.0 < κ <= 1.0 "Shear correction factor must be in (0, 1]"
+        @assert drilling_scale >= 0.0 "Drilling scale must be non-negative"
+        @assert shear_stab >= 0.0 "Shear stabilization must be non-negative"
         
         t = ustrip(u"m", thickness)
         E_val = ustrip(u"Pa", E)
@@ -108,6 +139,9 @@ mutable struct ShellTri3 <: ShellElement
             E_val,
             Float64(ν),
             Float64(ρ),
+            Float64(κ),
+            Float64(drilling_scale),
+            Float64(shear_stab),
             0,
             Vector{Int64}(undef, 18),
             area,
@@ -125,8 +159,15 @@ mutable struct ShellTri3 <: ShellElement
         nodes::NTuple{3, Node},
         thickness::Quantity,
         material::ShellMaterial;
-        id::Symbol = :shell
+        id::Symbol = :shell,
+        κ::Real = 5.0/6.0,
+        drilling_scale::Real = 1.0,
+        shear_stab::Real = 5.0/18.0
     )
+        @assert 0.0 < κ <= 1.0 "Shear correction factor must be in (0, 1]"
+        @assert drilling_scale >= 0.0 "Drilling scale must be non-negative"
+        @assert shear_stab >= 0.0 "Shear stabilization must be non-negative"
+        
         t = ustrip(u"m", thickness)
         area = _compute_triangle_area(nodes)
         
@@ -136,6 +177,39 @@ mutable struct ShellTri3 <: ShellElement
             material.E,
             material.ν,
             material.ρ,
+            Float64(κ),
+            Float64(drilling_scale),
+            Float64(shear_stab),
+            0,
+            Vector{Int64}(undef, 18),
+            area,
+            zeros(18, 18),
+            zeros(18, 18),
+            zeros(18, 18),
+            [zeros(3), zeros(3), zeros(3)],
+            zeros(3, 2),
+            id
+        )
+    end
+    
+    # Constructor with Material (Asap's frame material type)
+    function ShellTri3(
+        nodes::NTuple{3, Node},
+        thickness::Quantity,
+        material::Material;
+        id::Symbol = :shell
+    )
+        t = ustrip(u"m", thickness)
+        E_val = ustrip(u"Pa", material.E)
+        ρ_val = ustrip(u"kg/m^3", material.ρ)
+        area = _compute_triangle_area(nodes)
+        
+        new(
+            nodes,
+            t,
+            E_val,
+            material.ν,
+            ρ_val,
             0,
             Vector{Int64}(undef, 18),
             area,
@@ -377,11 +451,9 @@ end
 Transverse shear constitutive matrix Dt (2×2).
 
 For transverse shear: τ = Dt · γ
-Includes shear correction factor κ = 5/6.
 """
-function _transverse_shear_D(E::Float64, ν::Float64)
+function _transverse_shear_D(E::Float64, ν::Float64, κ::Float64)
     G = E / (2.0 * (1.0 + ν))
-    κ = 5.0 / 6.0  # Shear correction factor
     return [κ*G  0.0;
             0.0  κ*G]
 end
@@ -430,11 +502,14 @@ The stiffness combines:
 - Bending (plate curvature)
 - Transverse shear (DSG formulation with Lyly-Stenberg-Vihinen stabilization)
 - Drilling DOF stabilization
+
+Uses element's configurable parameters: κ (shear correction), drilling_scale, shear_stab.
 """
 function local_K(elem::ShellTri3)
     t = elem.thickness
     E = elem.E
     ν = elem.ν
+    κ = elem.κ
     Ae = elem.area
     ecoords_e = elem.ecoords_e
     
@@ -453,7 +528,7 @@ function local_K(elem::ShellTri3)
     
     # Material matrices
     Dps = _plane_stress_D(E, ν)
-    Dt = _transverse_shear_D(E, ν)
+    Dt = _transverse_shear_D(E, ν, κ)
     
     # Membrane stiffness: K_m = t * Ae * Bm' * Dps * Bm
     _Bmmat!(Bm, gradN_e)
@@ -464,9 +539,8 @@ function local_K(elem::ShellTri3)
     _add_btdb!(K, Bb, (t^3 / 12.0) * Ae, Dps, DBb)
     
     # Transverse shear stiffness with Lyly-Stenberg-Vihinen stabilization
-    # Shear factor: t³/(t² + mult*h²) where h² ≈ 2*Ae
-    mult_el_size = 5.0 / 12.0 / 1.5  # Standard stabilization factor
-    shear_factor = (t^3 / (t^2 + mult_el_size * 2.0 * Ae)) * Ae
+    # Shear factor: t³/(t² + shear_stab·h²) where h² ≈ 2·Ae
+    shear_factor = (t^3 / (t^2 + elem.shear_stab * 2.0 * Ae)) * Ae
     
     _Bsmat!(Bs, ecoords_e, Ae)
     _add_btdb!(K, Bs, shear_factor, Dt, DBs)
@@ -475,12 +549,13 @@ function local_K(elem::ShellTri3)
     _complete_lt!(K)
     
     # Drilling DOF stabilization (θz)
-    # Add small stiffness to drilling DOFs based on average bending stiffness
-    kavg = _mean([K[4,4], K[5,5], K[10,10], K[11,11], K[16,16], K[17,17]])
-    drilling_scale = 1.0
-    K[6, 6] += kavg * drilling_scale
-    K[12, 12] += kavg * drilling_scale
-    K[18, 18] += kavg * drilling_scale
+    # Add stiffness to drilling DOFs based on average bending stiffness
+    if elem.drilling_scale > 0.0
+        kavg = _mean([K[4,4], K[5,5], K[10,10], K[11,11], K[16,16], K[17,17]])
+        K[6, 6] += kavg * elem.drilling_scale
+        K[12, 12] += kavg * elem.drilling_scale
+        K[18, 18] += kavg * elem.drilling_scale
+    end
     
     return K
 end

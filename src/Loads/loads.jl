@@ -361,25 +361,5 @@ function SelfWeight(shell::ShellElement; kwargs...)
     SelfWeight([shell]; kwargs...)
 end
 
-# =============================================================================
-# Backward Compatibility: SurfaceLoad alias
-# =============================================================================
-
-"""
-    SurfaceLoad(element, pressure, direction)
-
-DEPRECATED: Use `AreaLoad` instead.
-
-Alias for backward compatibility. Creates an AreaLoad with distribute_to=:nodes.
-"""
-function SurfaceLoad(
-    element::ShellElement,
-    pressure::Quantity,
-    direction::NTuple{3, Float64} = (0.0, 0.0, -1.0),
-    id::Symbol = :surfaceload
-)
-    AreaLoad([element], pressure; direction=direction, distribute_to=:nodes, id=id)
-end
-
 # populate_load! for AreaLoad is defined in Model/preprocessing.jl
 # to avoid circular dependency (loads.jl is included before model.jl)

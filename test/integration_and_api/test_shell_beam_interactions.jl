@@ -258,7 +258,7 @@ end
         beams, beam_nodes = make_rect_beams(Lx, Ly)
         
         pressure = 5000.0u"Pa"
-        loads = Asap.shell_to_tributary_loads(shells, beams, pressure)
+        loads = Asap._shell_to_tributary_loads(shells, beams, pressure)
         
         @test length(loads) == 4  # One load per beam
         
@@ -291,7 +291,7 @@ end
         beams, _ = make_rect_beams(Lx, Ly)
         
         pressure = 5000.0u"Pa"
-        loads = Asap.shell_to_tributary_loads(shells, beams, pressure)
+        loads = Asap._shell_to_tributary_loads(shells, beams, pressure)
         
         # For isotropic straight skeleton of 4×3 rectangle:
         # Max tributary width = min(Lx, Ly) / 2 = 1.5 m
@@ -309,7 +309,7 @@ end
         beams, _ = make_rect_beams(Lx, Ly)
         
         pressure = 5000.0u"Pa"  # 5 kPa
-        loads = Asap.shell_to_tributary_loads(shells, beams, pressure)
+        loads = Asap._shell_to_tributary_loads(shells, beams, pressure)
         
         # Max intensity = pressure × max_width = 5000 × 1.5 = 7500 N/m
         expected_max_intensity = 5000.0 * min(Lx, Ly) / 2
@@ -335,7 +335,7 @@ end
         pressure = 5000.0u"Pa"
         
         # Should throw an error
-        @test_throws Exception Asap.shell_to_tributary_loads(shells, [interior_beam], pressure)
+        @test_throws Exception Asap._shell_to_tributary_loads(shells, [interior_beam], pressure)
     end
     
 end
@@ -352,7 +352,7 @@ end
         beams, _ = make_rect_beams(Lx, Ly)
         
         pressure = 5000.0u"Pa"
-        loads = Asap.shell_to_tributary_loads(shells, beams, pressure; axis=nothing)
+        loads = Asap._shell_to_tributary_loads(shells, beams, pressure; axis=nothing)
         
         # All 4 beams should have non-zero load
         for load in loads
@@ -372,7 +372,7 @@ end
         beams, _ = make_rect_beams(Lx, Ly)
         
         pressure = 5000.0u"Pa"
-        loads = Asap.shell_to_tributary_loads(shells, beams, pressure; axis=[1.0, 0.0])
+        loads = Asap._shell_to_tributary_loads(shells, beams, pressure; axis=[1.0, 0.0])
         
         for load in loads
             max_intensity = maximum(Asap.intensities(load))
@@ -400,7 +400,7 @@ end
         beams, _ = make_rect_beams(Lx, Ly)
         
         pressure = 5000.0u"Pa"
-        loads = Asap.shell_to_tributary_loads(shells, beams, pressure; axis=[0.0, 1.0])
+        loads = Asap._shell_to_tributary_loads(shells, beams, pressure; axis=[0.0, 1.0])
         
         for load in loads
             max_intensity = maximum(Asap.intensities(load))
@@ -440,9 +440,9 @@ end
             return force
         end
         
-        loads_iso = Asap.shell_to_tributary_loads(shells, beams, pressure; axis=nothing)
-        loads_x = Asap.shell_to_tributary_loads(shells, beams, pressure; axis=[1.0, 0.0])
-        loads_y = Asap.shell_to_tributary_loads(shells, beams, pressure; axis=[0.0, 1.0])
+        loads_iso = Asap._shell_to_tributary_loads(shells, beams, pressure; axis=nothing)
+        loads_x = Asap._shell_to_tributary_loads(shells, beams, pressure; axis=[1.0, 0.0])
+        loads_y = Asap._shell_to_tributary_loads(shells, beams, pressure; axis=[0.0, 1.0])
         
         F_iso = total_force(loads_iso)
         F_x = total_force(loads_x)
@@ -473,9 +473,9 @@ end
         pressure = 5000.0u"Pa"
         
         # Test symbolic axis specification
-        loads_iso = Asap.shell_to_tributary_loads(shells, beams, pressure, :isotropic)
-        loads_x = Asap.shell_to_tributary_loads(shells, beams, pressure, :x)
-        loads_y = Asap.shell_to_tributary_loads(shells, beams, pressure, :y)
+        loads_iso = Asap._shell_to_tributary_loads(shells, beams, pressure; axis=nothing)
+        loads_x = Asap._shell_to_tributary_loads(shells, beams, pressure; axis=[1.0, 0.0])
+        loads_y = Asap._shell_to_tributary_loads(shells, beams, pressure; axis=[0.0, 1.0])
         
         @test length(loads_iso) == 4
         @test length(loads_x) == 4
@@ -548,7 +548,7 @@ end
         
         # Use multi-panel function
         pressure = 5000.0u"Pa"
-        loads = Asap.shell_panels_to_tributary_loads([panel_A, panel_B], all_beams, pressure)
+        loads = Asap._shell_panels_to_tributary_loads([panel_A, panel_B], all_beams, pressure)
         
         @test length(loads) == 7  # All beams get a load
         
@@ -614,7 +614,7 @@ end
         
         pressure = 5000.0u"Pa"
         
-        @test_throws Exception Asap.shell_panels_to_tributary_loads([panel], [unmatched_beam], pressure)
+        @test_throws Exception Asap._shell_panels_to_tributary_loads([panel], [unmatched_beam], pressure)
     end
     
 end
@@ -673,7 +673,7 @@ end
         beams = [beam1, beam2, beam3, beam4]
         
         # Generate tributary loads
-        trib_loads = Asap.shell_to_tributary_loads(shells, beams, pressure*u"Pa")
+        trib_loads = Asap._shell_to_tributary_loads(shells, beams, pressure*u"Pa")
         
         # Build and solve model
         nodes = [n1_base, n2_base, n3_base, n4_base, n1_top, n2_top, n3_top, n4_top]
@@ -712,7 +712,7 @@ end
         beams, _ = make_rect_beams(4.0, 3.0)
         pressure = 5000.0u"Pa"
         
-        loads = Asap.shell_to_tributary_loads(Asap.ShellTri3[], beams, pressure)
+        loads = Asap._shell_to_tributary_loads(Asap.ShellTri3[], beams, pressure)
         @test isempty(loads)
     end
     
@@ -720,7 +720,7 @@ end
         shells, _ = make_rect_shells(4.0, 3.0)
         pressure = 5000.0u"Pa"
         
-        loads = Asap.shell_to_tributary_loads(shells, Asap.Element[], pressure)
+        loads = Asap._shell_to_tributary_loads(shells, Asap.Element[], pressure)
         @test isempty(loads)
     end
     
@@ -740,7 +740,7 @@ end
         beam3 = Asap.Element(n3, n1, sec, :b3)
         
         pressure = 5000.0u"Pa"
-        loads = Asap.shell_to_tributary_loads([shell], [beam1, beam2, beam3], pressure)
+        loads = Asap._shell_to_tributary_loads([shell], [beam1, beam2, beam3], pressure)
         
         @test length(loads) == 3
         
@@ -771,7 +771,7 @@ end
         beams, _ = make_rect_beams(Lx, Ly)
         
         pressure = 5000.0u"Pa"
-        loads = Asap.shell_to_tributary_loads(shells, beams, pressure)
+        loads = Asap._shell_to_tributary_loads(shells, beams, pressure)
         
         @test length(loads) == 4
         

@@ -540,62 +540,15 @@ function _line_segment_intersection(
 end
 
 # =============================================================================
-# Public API (Deprecated - use AreaLoad instead)
+# Internal Helpers
 # =============================================================================
 
 """
-    shell_to_tributary_loads(shells, beams, pressure; axis=nothing, ...)
+Internal: Generate TributaryLoads from multiple shell panels.
 
-DEPRECATED: Use `AreaLoad(shells, pressure; distribute_to=beams)` instead.
-
-Convert shell panel geometry into TributaryLoads for edge beams.
-"""
-function shell_to_tributary_loads(
-    shells::Vector{<:ShellElement},
-    beams::Vector{<:FrameElement},
-    pressure::Quantity;
-    axis::Union{Nothing, Vector{Float64}} = nothing,
-    kwargs...
-)
-    _shell_to_tributary_loads(shells, beams, pressure; axis=axis, kwargs...)
-end
-
-function shell_to_tributary_loads(
-    shells::Vector{<:ShellElement},
-    beams::Vector{<:FrameElement},
-    pressure::Quantity,
-    axis::NTuple{2, <:Real};
-    kwargs...
-)
-    axis_vec = [Float64(axis[1]), Float64(axis[2])]
-    _shell_to_tributary_loads(shells, beams, pressure; axis=axis_vec, kwargs...)
-end
-
-function shell_to_tributary_loads(
-    shells::Vector{<:ShellElement},
-    beams::Vector{<:FrameElement},
-    pressure::Quantity,
-    axis_symbol::Symbol;
-    kwargs...
-)
-    axis = if axis_symbol == :x
-        [1.0, 0.0]
-    elseif axis_symbol == :y
-        [0.0, 1.0]
-    elseif axis_symbol == :isotropic
-        nothing
-    else
-        error("Unknown axis symbol: $axis_symbol. Use tuple (x, y) or :isotropic")
-    end
-    _shell_to_tributary_loads(shells, beams, pressure; axis=axis, kwargs...)
-end
-
-"""
-    shell_panels_to_tributary_loads(panels, beams, pressure; ...)
-
-DEPRECATED: Use `AreaLoad(panels, pressure; distribute_to=beams)` instead.
-
-Generate TributaryLoads from multiple shell panels.
+For multi-bay slabs where each bay is a separate panel (Vector of shells),
+this function combines tributary contributions from adjacent panels.
+Interior beams that appear in multiple panels get combined load.
 """
 function _shell_panels_to_tributary_loads(
     panels::Vector{Vector{S}},
@@ -661,50 +614,30 @@ function _shell_panels_to_tributary_loads(
         tributaries = get(beam_tributaries, beam, Tuple{Vector{Float64}, Vector{Float64}}[])
         
         if isempty(tributaries)
-            # Beam matched but got zero tributary (shouldn't happen after the check above)
             continue
         elseif length(tributaries) == 1
-            # Single panel contribution
             positions, depths = tributaries[1]
         else
-            # Multiple panels - combine by summing depths at each position
-            # Use union of all positions, interpolate depths
+            # Multiple panels - combine by summing depths
             combined = _combine_tributary_depths(tributaries)
             positions, depths = combined
         end
         
-        # Clamp negative depths to zero (can occur with numerical precision issues)
+        # Clamp negative depths to zero
         depths = max.(depths, 0.0)
         widths = [d * u"m" for d in depths]
         
-        # Handle zero-load case (empty or all-zero depths)
+        # Handle zero-load case
         max_depth = isempty(depths) ? 0.0 : maximum(depths)
         if max_depth < 1e-9
             positions = [0.0, 1.0]
             widths = [0.0u"m", 0.0u"m"]
         end
         
-        trib_load = TributaryLoad(
-            beam,
-            positions,
-            widths,
-            pressure,
-            direction
-        )
-        push!(loads, trib_load)
+        push!(loads, TributaryLoad(beam, positions, widths, pressure, direction))
     end
     
     return loads
-end
-
-# Public wrapper for backward compatibility
-function shell_panels_to_tributary_loads(
-    panels::Vector{Vector{S}},
-    beams::Vector{<:FrameElement},
-    pressure::Quantity;
-    kwargs...
-) where S <: ShellElement
-    _shell_panels_to_tributary_loads(panels, beams, pressure; kwargs...)
 end
 
 """Internal: Combine multiple tributary depth profiles by summing depths at each position."""

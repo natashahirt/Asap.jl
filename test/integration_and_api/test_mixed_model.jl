@@ -324,10 +324,10 @@ end
     
 end
 
-@testset "SurfaceLoad Integration" begin
+@testset "AreaLoad Integration" begin
     
-    @testset "SurfaceLoad in Model pipeline" begin
-        # Test that SurfaceLoad properly populates model.P
+    @testset "AreaLoad in Model pipeline" begin
+        # Test that AreaLoad properly populates model.P
         # Shell lies in XY plane with two edges fixed for stability
         n1 = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], :fixed)  # Pinned
         n2 = Asap.Node([1.0u"m", 0.0u"m", 0.0u"m"], :fixed)  # Pinned (stable edge)
@@ -337,7 +337,7 @@ end
         
         # Apply 1000 Pa downward pressure
         pressure = 1000.0u"Pa"
-        load = Asap.SurfaceLoad(shell, pressure, (0.0, 0.0, -1.0))
+        load = Asap.AreaLoad(shell, pressure; direction=(0.0, 0.0, -1.0))
         
         # Create shell-only Model
         model = Model([n1, n2, n3], [shell], [load])
@@ -369,8 +369,8 @@ end
         @test model.u[n3.globalID[3]] < 0
     end
     
-    @testset "SurfaceLoad in mixed Model" begin
-        # Test SurfaceLoad works when there are also frame elements
+    @testset "AreaLoad in mixed Model" begin
+        # Test AreaLoad works when there are also frame elements
         # Simple supported shell with a cantilever beam attached
         n1 = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], :fixed)  # Shell corner - fixed
         n2 = Asap.Node([2.0u"m", 0.0u"m", 0.0u"m"], :fixed)  # Shell corner - fixed
@@ -389,7 +389,7 @@ end
         shell = Asap.ShellTri3((n1, n2, n3), 0.1u"m", 200e9u"Pa", 0.3; id=:plate, ρ=7850.0)
         
         # Surface load on shell
-        surface_load = Asap.SurfaceLoad(shell, 1000.0u"Pa", (0.0, 0.0, -1.0))
+        surface_load = Asap.AreaLoad(shell, 1000.0u"Pa"; direction=(0.0, 0.0, -1.0))
         
         # Point load at cantilever tip
         point_load = Asap.NodeForce(n4, [0.0u"N", 0.0u"N", -5000.0u"N"])
@@ -415,7 +415,7 @@ end
         @test model.u[n4.globalID[3]] < 0  # Cantilever tip
     end
     
-    @testset "Multiple SurfaceLoads" begin
+    @testset "Multiple AreaLoads" begin
         # Test multiple surface loads on different shells
         # Simple supported square slab made of two triangles
         n1 = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], :fixed)  # Corner - fixed
@@ -428,8 +428,8 @@ end
         shell2 = Asap.ShellTri3((n1, n4, n3), 0.1u"m", 200e9u"Pa", 0.3; id=:shell2, ρ=7850.0)
         
         # Different pressures on each
-        load1 = Asap.SurfaceLoad(shell1, 1000.0u"Pa", (0.0, 0.0, -1.0))
-        load2 = Asap.SurfaceLoad(shell2, 2000.0u"Pa", (0.0, 0.0, -1.0))
+        load1 = Asap.AreaLoad(shell1, 1000.0u"Pa"; direction=(0.0, 0.0, -1.0))
+        load2 = Asap.AreaLoad(shell2, 2000.0u"Pa"; direction=(0.0, 0.0, -1.0))
         
         model = Model([n1, n2, n3, n4], Asap.FrameElement[], [shell1, shell2], [load1, load2])
         process!(model)
@@ -538,7 +538,7 @@ end
         
         # Surface load on shell
         pressure = 5000.0  # Pa
-        load = Asap.SurfaceLoad(shell, pressure*u"Pa", (0.0, 0.0, -1.0))
+        load = Asap.AreaLoad(shell, pressure*u"Pa"; direction=(0.0, 0.0, -1.0))
         
         model = Model([n1, n2, n3, n4], [beam], [shell], [load])
         process!(model)
@@ -794,7 +794,7 @@ end
     
     @testset "3D Slab on Columns: Shell FEM vs Tributary Load" begin
         # Compare two modeling approaches for a slab supported by 4 columns:
-        # 1. Full shell FEM: explicit shell elements with SurfaceLoad
+        # 1. Full shell FEM: explicit shell elements with AreaLoad
         # 2. Tributary load: LineLoads on beams approximating the same loading
         #
         # Geometry:
@@ -880,10 +880,10 @@ end
                                 E_concrete, ν_concrete; id=:slab, ρ=ρ_concrete)
         
         # Surface loads on each shell (downward)
-        load1 = Asap.SurfaceLoad(shell1, pressure*u"Pa", (0.0, 0.0, -1.0))
-        load2 = Asap.SurfaceLoad(shell2, pressure*u"Pa", (0.0, 0.0, -1.0))
-        load3 = Asap.SurfaceLoad(shell3, pressure*u"Pa", (0.0, 0.0, -1.0))
-        load4 = Asap.SurfaceLoad(shell4, pressure*u"Pa", (0.0, 0.0, -1.0))
+        load1 = Asap.AreaLoad(shell1, pressure*u"Pa"; direction=(0.0, 0.0, -1.0))
+        load2 = Asap.AreaLoad(shell2, pressure*u"Pa"; direction=(0.0, 0.0, -1.0))
+        load3 = Asap.AreaLoad(shell3, pressure*u"Pa"; direction=(0.0, 0.0, -1.0))
+        load4 = Asap.AreaLoad(shell4, pressure*u"Pa"; direction=(0.0, 0.0, -1.0))
         
         nodes_shell = [n1_base, n2_base, n3_base, n4_base, n1_top, n2_top, n3_top, n4_top, n_center]
         frame_elements = [col1, col2, col3, col4, beam1, beam2, beam3, beam4]
@@ -1126,7 +1126,7 @@ end
         
         # Surface load
         pressure = 2000.0  # Pa
-        load = Asap.SurfaceLoad(shell, pressure*u"Pa", (0.0, 0.0, -1.0))
+        load = Asap.AreaLoad(shell, pressure*u"Pa"; direction=(0.0, 0.0, -1.0))
         
         model = Model([n1, n2, n3], [beam], [shell], [load])
         process!(model)

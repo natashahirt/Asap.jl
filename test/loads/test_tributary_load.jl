@@ -1,9 +1,8 @@
 using Asap
-using StructuralBase: StructuralUnits
 using Test
 using Unitful
 
-Unitful.register(StructuralUnits)
+# Units are registered in runtests.jl via Unitful.register(Asap)
 
 @testset "TributaryLoad" begin
     # Create a simple fixed-fixed beam (10m span)

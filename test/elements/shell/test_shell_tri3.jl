@@ -204,7 +204,7 @@ using Unitful
         @info "Bending moment test" M=M Mxx_expected=Mxx_expected
     end
     
-    @testset "SurfaceLoad Application" begin
+    @testset "AreaLoad Application" begin
         n1 = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], :free)
         n2 = Asap.Node([1.0u"m", 0.0u"m", 0.0u"m"], :free)
         n3 = Asap.Node([0.5u"m", 0.866u"m", 0.0u"m"], :free)
@@ -219,7 +219,7 @@ using Unitful
         
         # Apply 1000 Pa pressure
         pressure = 1000.0u"Pa"
-        load = Asap.SurfaceLoad(elem, pressure, (0.0, 0.0, -1.0))
+        load = Asap.AreaLoad(elem, pressure; direction=(0.0, 0.0, -1.0))
         
         # Compute nodal forces
         nf = Asap.nodal_forces(load)

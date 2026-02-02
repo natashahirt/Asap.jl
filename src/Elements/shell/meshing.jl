@@ -53,16 +53,66 @@ struct ShellSection
     end
 end
 
-# Common presets
-const Concrete_ShellSection_150mm = ShellSection(0.15u"m", 30u"GPa", 0.2; ρ=2400u"kg/m^3", name=:concrete_150mm)
-const Concrete_ShellSection_200mm = ShellSection(0.20u"m", 30u"GPa", 0.2; ρ=2400u"kg/m^3", name=:concrete_200mm)
+# Note: ShellSection presets removed. Create sections inline:
+# ShellSection(0.15u"m", 30u"GPa", 0.2; ρ=2400u"kg/m^3", name=:concrete)
+
+# ============================================================================
+# Polygon Validation Helpers
+# ============================================================================
+
+"""Shoelace formula for signed polygon area (positive if CCW)."""
+function _shoelace_area(pts::Vector{<:Tuple{<:Real, <:Real}})
+    n = length(pts)
+    n < 3 && return 0.0
+    area = sum(pts[i][1] * pts[mod1(i+1,n)][2] - pts[mod1(i+1,n)][1] * pts[i][2] for i in 1:n) / 2
+    return area
+end
+
+"""Check if two line segments intersect (not at endpoints)."""
+function _segments_intersect(
+    p1::Tuple{<:Real, <:Real}, p2::Tuple{<:Real, <:Real},
+    p3::Tuple{<:Real, <:Real}, p4::Tuple{<:Real, <:Real}
+)
+    # Direction vectors
+    d1 = (p2[1] - p1[1], p2[2] - p1[2])
+    d2 = (p4[1] - p3[1], p4[2] - p3[2])
+    
+    # Cross product (2D)
+    cross = d1[1] * d2[2] - d1[2] * d2[1]
+    abs(cross) < 1e-12 && return false  # Parallel
+    
+    # Solve for parameters t and s
+    t = ((p3[1] - p1[1]) * d2[2] - (p3[2] - p1[2]) * d2[1]) / cross
+    s = ((p3[1] - p1[1]) * d1[2] - (p3[2] - p1[2]) * d1[1]) / cross
+    
+    # Intersection in interior of both segments (exclude endpoints)
+    ε = 1e-9
+    return ε < t < 1-ε && ε < s < 1-ε
+end
+
+"""Check if polygon is self-intersecting (edges cross each other)."""
+function _is_self_intersecting(pts::Vector{<:Tuple{<:Real, <:Real}})
+    n = length(pts)
+    n < 4 && return false  # Triangle can't self-intersect
+    
+    for i in 1:n
+        p1, p2 = pts[i], pts[mod1(i+1, n)]
+        # Check against non-adjacent edges
+        for j in (i+2):n
+            j == n && i == 1 && continue  # Skip edge that shares vertex with edge i
+            p3, p4 = pts[j], pts[mod1(j+1, n)]
+            _segments_intersect(p1, p2, p3, p4) && return true
+        end
+    end
+    return false
+end
 
 # ============================================================================
 # DiaphragmSection - rigid in-plane, massless
 # ============================================================================
 
 """
-    DiaphragmSection(; thickness=0.01u"m", E=1e12u"Pa", ν=0.3)
+    DiaphragmSection(; thickness=0.01u"m", E=1e12u"Pa", ν=0.3, name=:diaphragm)
 
 A section for rigid diaphragm elements: very stiff in-plane, zero mass.
 
@@ -74,26 +124,47 @@ while not contributing mass or significant out-of-plane stiffness.
 - Connecting frames at floor levels
 - Distributing lateral loads to frames
 
-# Properties
-- `E`: Very high (1 TPa default) → rigid in-plane
-- `ρ`: Zero → no mass contribution
-- `thickness`: Small (10mm default) → minimal out-of-plane stiffness
+# Design Parameters
+
+**thickness** (default: 10mm = 0.01m): Controls out-of-plane stiffness.
+- Smaller thickness → more flexible out-of-plane (desirable for pure in-plane constraint)
+- Typical range: 5-20mm
+- Note: Too thin can cause numerical issues; too thick adds unwanted bending stiffness
+
+**E** (default: 1 TPa = 1e12 Pa): Young's modulus for in-plane stiffness.
+- Higher E → more rigid in-plane behavior
+- 1 TPa is ~5× steel stiffness, sufficient for practical rigidity
+- Use 200 GPa for steel-like diaphragm, 30 GPa for concrete-like
+
+**ν** (default: 0.3): Poisson's ratio
+- Affects in-plane lateral contraction
+- 0.3 is typical for metals; 0.2 for concrete
 
 # Example
 ```julia
+# Default rigid diaphragm
 diaphragm_sec = DiaphragmSection()
+
+# Steel deck diaphragm (less rigid, for sensitivity studies)
+steel_diaphragm = DiaphragmSection(E=200u"GPa", thickness=0.003u"m")
+
+# Create diaphragm elements
 diaphragms = Diaphragm((n1, n2, n3, n4), diaphragm_sec)
 ```
+
+# Notes
+- Mass (ρ) is always 0 for diaphragms - they don't contribute to modal analysis
+- If you need mass, use `Shell()` with full material properties instead
 """
 struct DiaphragmSection
-    thickness::Float64  # meters (small)
-    E::Float64          # Pa (very high)
+    thickness::Float64  # meters
+    E::Float64          # Pa
     ν::Float64
     name::Symbol
     
     function DiaphragmSection(;
         thickness::Quantity = 0.01u"m",
-        E::Quantity = 1e12u"Pa",  # 1 TPa - effectively rigid
+        E::Quantity = 1e12u"Pa",
         ν::Real = 0.3,
         name::Symbol = :diaphragm
     )
@@ -104,7 +175,7 @@ struct DiaphragmSection
     end
 end
 
-# Default diaphragm section
+# Default diaphragm section (1 TPa, 10mm thick)
 const RigidDiaphragm = DiaphragmSection()
 
 # ============================================================================
@@ -360,14 +431,30 @@ function Shell(
     interior_support_type::Union{Symbol, Vector{Bool}} = :pinned
 ) where N
     nc = length(corners)
-    @assert nc >= 3 "Shell requires at least 3 corner nodes"
+    
+    # ===========================================================================
+    # Input Validation
+    # ===========================================================================
+    @assert nc >= 3 "Shell requires at least 3 corner nodes, got $nc"
+    @assert n >= 1 "Mesh refinement n must be at least 1, got $n"
+    
+    # Extract corner positions for validation
+    boundary_pts = [(ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2])) 
+                    for node in corners]
+    
+    # Check for degenerate polygon (zero or negative area)
+    area = _shoelace_area(boundary_pts)
+    @assert abs(area) > 1e-12 "Shell polygon is degenerate (zero area). Check corner positions."
+    
+    # Check for self-intersection (simple polygon test)
+    @assert !_is_self_intersecting(boundary_pts) "Shell polygon is self-intersecting. Corners must form a simple polygon."
+    
+    # ===========================================================================
+    # Mesh Generation
+    # ===========================================================================
     
     # Convert interior supports to _SupportLine
     support_lines = [_to_support_line(s) for s in interior_supports]
-    
-    # Extract corner positions
-    boundary_pts = [(ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2])) 
-                    for node in corners]
     
     # Generate mesh points with supports
     all_points, support_point_indices = _generate_mesh_points_with_supports(boundary_pts, n, support_lines)

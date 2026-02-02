@@ -106,10 +106,10 @@ shell3 = Asap.ShellTri3((n3_top_s, n4_top_s, n_center_s), slab_thickness*u"m", E
 shell4 = Asap.ShellTri3((n4_top_s, n1_top_s, n_center_s), slab_thickness*u"m", E_concrete, ν_concrete; id=:slab, ρ=ρ_concrete)
 
 # Surface loads on shells
-load1_s = Asap.SurfaceLoad(shell1, pressure*u"Pa", (0.0, 0.0, -1.0))
-load2_s = Asap.SurfaceLoad(shell2, pressure*u"Pa", (0.0, 0.0, -1.0))
-load3_s = Asap.SurfaceLoad(shell3, pressure*u"Pa", (0.0, 0.0, -1.0))
-load4_s = Asap.SurfaceLoad(shell4, pressure*u"Pa", (0.0, 0.0, -1.0))
+load1_s = Asap.AreaLoad(shell1, pressure*u"Pa"; direction=(0.0, 0.0, -1.0))
+load2_s = Asap.AreaLoad(shell2, pressure*u"Pa"; direction=(0.0, 0.0, -1.0))
+load3_s = Asap.AreaLoad(shell3, pressure*u"Pa"; direction=(0.0, 0.0, -1.0))
+load4_s = Asap.AreaLoad(shell4, pressure*u"Pa"; direction=(0.0, 0.0, -1.0))
 
 model_shell = Asap.Model(
     [n1_base_s, n2_base_s, n3_base_s, n4_base_s, n1_top_s, n2_top_s, n3_top_s, n4_top_s, n_center_s],
@@ -202,11 +202,11 @@ println("  Beam1 shear (Vy): $(round(Vy_beam1_trib, digits=1)) N")
 println("  Beam1 moment (My): $(round(My_beam1_trib, digits=1)) Nm")
 
 # =============================================================================
-# MODEL 3: HYBRID (shell_to_tributary_loads)
+# MODEL 3: HYBRID (internal tributary conversion)
 # =============================================================================
 
 println("\n" * "-"^40)
-println("MODEL 3: Hybrid (shell_to_tributary_loads)")
+println("MODEL 3: Hybrid (internal tributary conversion)")
 println("-"^40)
 
 # Same frame structure as pure tributary, but loads computed from shell geometry
@@ -238,10 +238,10 @@ shell2_h = Asap.ShellTri3((n2_top_h, n3_top_h, n_center_h), slab_thickness*u"m",
 shell3_h = Asap.ShellTri3((n3_top_h, n4_top_h, n_center_h), slab_thickness*u"m", E_concrete, ν_concrete; id=:slab, ρ=ρ_concrete)
 shell4_h = Asap.ShellTri3((n4_top_h, n1_top_h, n_center_h), slab_thickness*u"m", E_concrete, ν_concrete; id=:slab, ρ=ρ_concrete)
 
-# Use shell_to_tributary_loads to generate loads from shell geometry
+# Use internal function to generate loads from shell geometry
 shells_h = [shell1_h, shell2_h, shell3_h, shell4_h]
 beams_h = [beam1_h, beam2_h, beam3_h, beam4_h]
-loads_h = Asap.shell_to_tributary_loads(shells_h, beams_h, pressure*u"Pa")
+loads_h = Asap._shell_to_tributary_loads(shells_h, beams_h, pressure*u"Pa")
 
 model_hybrid = Asap.FrameModel(
     [n1_base_h, n2_base_h, n3_base_h, n4_base_h, n1_top_h, n2_top_h, n3_top_h, n4_top_h],
@@ -301,7 +301,7 @@ shell4_ow = Asap.ShellTri3((n4_top_ow, n1_top_ow, n_center_ow), slab_thickness*u
 shells_ow = [shell1_ow, shell2_ow, shell3_ow, shell4_ow]
 beams_ow = [beam1_ow, beam2_ow, beam3_ow, beam4_ow]
 
-loads_ow = Asap.shell_to_tributary_loads(shells_ow, beams_ow, pressure*u"Pa", (1.0, 0.0))  # One-way X
+loads_ow = Asap._shell_to_tributary_loads(shells_ow, beams_ow, pressure*u"Pa"; axis=[1.0, 0.0])  # One-way X
 
 model_oneway = Asap.FrameModel(
     [n1_base_ow, n2_base_ow, n3_base_ow, n4_base_ow, n1_top_ow, n2_top_ow, n3_top_ow, n4_top_ow],

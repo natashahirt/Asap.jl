@@ -208,7 +208,7 @@ using Unitful
         @info "Ply stress recovery" σ_ply1=σ_ply1 σ_ply2=σ_ply2
     end
     
-    @testset "SurfaceLoad on Composite Shell" begin
+    @testset "AreaLoad on Composite Shell" begin
         n1 = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], :free)
         n2 = Asap.Node([1.0u"m", 0.0u"m", 0.0u"m"], :free)
         n3 = Asap.Node([0.5u"m", 0.866u"m", 0.0u"m"], :free)
@@ -226,7 +226,7 @@ using Unitful
         Asap.process!(elem)
         
         # Apply surface load
-        load = Asap.SurfaceLoad(elem, 5000.0u"Pa", (0.0, 0.0, -1.0))
+        load = Asap.AreaLoad(elem, 5000.0u"Pa"; direction=(0.0, 0.0, -1.0))
         
         # Check nodal forces
         nf = Asap.nodal_forces(load)

@@ -227,20 +227,20 @@ using LinearAlgebra
         @info "AreaLoad single-shell test passed"
     end
     
-    @testset "SurfaceLoad backward compatibility" begin
+    @testset "AreaLoad backward compatibility" begin
         n1 = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], :fixed)
         n2 = Asap.Node([Lx*u"m", 0.0u"m", 0.0u"m"], :fixed)
         n3 = Asap.Node([Lx*u"m", Ly*u"m", 0.0u"m"], :fixed)
         
         shell = Asap.ShellTri3((n1, n2, n3), t_slab*u"m", E_concrete*u"Pa", ν_concrete; id=:slab, ρ=ρ_concrete)
         
-        # Old SurfaceLoad API should still work
-        load = Asap.SurfaceLoad(shell, pressure*u"Pa")
+        # Old AreaLoad API should still work
+        load = Asap.AreaLoad(shell, pressure*u"Pa")
         
         @test load isa Asap.AreaLoad
         @test load.distribute_to == :nodes
         
-        @info "SurfaceLoad backward compat test passed"
+        @info "AreaLoad backward compat test passed"
     end
     
     @testset "Mixed Model with AreaLoad (FEM mode)" begin

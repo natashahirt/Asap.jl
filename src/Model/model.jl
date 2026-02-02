@@ -1,6 +1,31 @@
 abstract type AbstractModel end
 abstract type ElementModel <: AbstractModel end  # Models with single .elements field
 
+# =============================================================================
+# Shared Model Initialization
+# =============================================================================
+
+"""Default model state values for initializing any model type."""
+function _default_model_state(n_dof::Int)
+    (
+        DOFs = Bool[],
+        nDOFs = 0,
+        freeDOFs = Int64[],
+        fixedDOFs = Int64[],
+        S = spzeros(Float64, n_dof, n_dof),
+        P = zeros(n_dof),
+        u = zeros(n_dof),
+        reactions = zeros(n_dof),
+        compliance = 0.0,
+        tol = 1e-6,
+        processed = false
+    )
+end
+
+# =============================================================================
+# make_ids! - Assign sequential IDs to model components
+# =============================================================================
+
 function make_ids!(nodes::Vector{<:AbstractNode})
     for (i, node) in enumerate(nodes)
         node.nodeID = i

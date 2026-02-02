@@ -2,11 +2,47 @@ module Asap
 
 using LinearAlgebra, SparseArrays
 using Unitful
-using StructuralBase: StructuralUnits  # Shared unit definitions (lbf, kip, ksi, psf)
 
-# Units module (for type aliases and compatibility helpers)
+# =============================================================================
+# UNITS (canonical source for the ecosystem)
+# =============================================================================
+# All unit definitions, type aliases, and conversion helpers.
+# Other packages (StructuralSizer, StructuralSynthesizer) import from here.
 include("Units/units.jl")
-include("Units/compat.jl")
+
+# US Customary units
+export kip, ksi, psf, ksf, pcf
+
+# Physical constants
+export GRAVITY, STANDARD_GRAVITY, STANDARD_GRAVITY_F64
+
+# Dimension-based type aliases (for function signatures)
+export Length, Area, Volume
+export SecondMomentOfArea, TorsionalConstant, MomentOfInertia, WarpingConstant
+export Pressure, Force, Moment, Torque
+export LinearLoad, AreaLoadQuantity, Density, Acceleration
+
+# Concrete type aliases (for struct fields)
+export LengthQuantity, AreaQuantity, VolumeQuantity
+export PressureQuantity, ForceQuantity, MomentQuantity, ForcePerLength
+
+# Legacy/internal type aliases
+export Distance, QuantityDistance, QuantityForce, QuantityPressure, QuantityDensity, QuantityAcceleration
+
+# Unit conversion helpers - US Customary
+export to_inches, to_sqinches, to_ksi, to_kip, to_kipft
+
+# Unit conversion helpers - SI
+export to_meters, to_meters_squared, to_meters_fourth
+export to_pascals, to_newtons, to_newton_meters, to_newtons_per_meter
+export to_kg_per_m3, to_m_per_s2
+
+# Catalog parsing utilities
+export asfloat, maybe_asfloat
+
+# =============================================================================
+# GLOBAL AXES
+# =============================================================================
 
 # global axes
 const globalX::Vector{Float64} = [1., 0., 0.]
@@ -16,14 +52,11 @@ const globalZ::Vector{Float64} = [0., 0., 1.]
 include("Materials_Sections/material.jl")
 include("Materials_Sections/section.jl")
 include("Materials_Sections/layup.jl")  # Composite laminate definitions
-export Material
-export ShellMaterial
-export Concrete_Shell
-export Steel_Shell
+# Note: Material is internal (use StructuralSizer materials with to_asap_section()).
+# ShellMaterial is exported as a convenience type for shell elements.
 export Section
 export TrussSection
-export Steel_Nmm
-export Steel_kNm
+export ShellMaterial
 # Section helpers
 export is_timoshenko
 export is_bernoulli_euler
@@ -65,8 +98,6 @@ export translational_stiffness
 export rotational_stiffness
 # Shell creation
 export ShellSection
-export Concrete_ShellSection_150mm
-export Concrete_ShellSection_200mm
 export Shell
 export mesh
 export get_nodes
@@ -94,10 +125,10 @@ export local_mass
 export global_mass
 export global_mass!
 
+# LOADS - Basic load types (loads.jl defines TributaryLoad used by shell_loads)
 include("Loads/loads.jl")
 include("Loads/utilities.jl")
 include("Loads/fixed_end_forces.jl")
-include("Loads/shell_loads.jl")
 export AbstractLoad
 export NodeForce
 export NodeMoment
@@ -107,9 +138,31 @@ export PointLoad
 export TributaryLoad
 export AreaLoad
 export SelfWeight
-export SurfaceLoad        # Alias for backward compatibility
 export intensities
 export nodal_forces
+
+# TRIBUTARY AREA COMPUTATION
+# Must be included before shell_loads.jl (which uses get_tributary_polygons)
+include("Tributary/_tributary.jl")
+# Types
+export TributaryPolygon
+export TributaryBuffers
+export VertexTributary
+export SpanInfo
+# Edge tributaries (straight skeleton / one-way)
+export get_tributary_polygons
+export get_tributary_polygons_isotropic
+export get_tributary_polygons_one_way
+export vertices  # for converting parametric → absolute coords
+# Vertex tributaries (Voronoi)
+export compute_voronoi_tributaries
+# Span calculations
+export get_polygon_span
+export governing_spans
+export short_span, long_span, two_way_span
+
+# Shell-to-beam load distribution (requires Tributary)
+include("Loads/shell_loads.jl")
 
 include("Model/model.jl")
 include("Model/utilities.jl")
@@ -189,18 +242,6 @@ export print_buckling_summary
 export print_pdelta_summary
 export print_nonlinear_summary
 
-# FORCE DENSITY METHOD
-include("FDM/FDM.jl")
-export FDMnode
-export FDMelement
-export FDMload
-export Network
-export force
-export vector
-export forces
-export initial_lengths
-export update_q!
-
 # ANALYSIS - Internal forces and displacements
 include("Analysis/translations.jl")
 include("Analysis/force_functions.jl")
@@ -234,24 +275,5 @@ export shell_centroid
 export shell_centroid_3d
 export shell_tris_at_point
 export shell_tris_in_region
-
-# TRIBUTARY AREA COMPUTATION
-include("Tributary/_tributary.jl")
-# Types
-export TributaryPolygon
-export TributaryBuffers
-export VertexTributary
-export SpanInfo
-# Edge tributaries (straight skeleton / one-way)
-export get_tributary_polygons
-export get_tributary_polygons_isotropic
-export get_tributary_polygons_one_way
-export vertices  # for converting parametric → absolute coords
-# Vertex tributaries (Voronoi)
-export compute_voronoi_tributaries
-# Span calculations
-export get_polygon_span
-export governing_spans
-export short_span, long_span, two_way_span
 
 end 

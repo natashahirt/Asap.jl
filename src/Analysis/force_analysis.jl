@@ -80,22 +80,31 @@ function _PLine_partial(w, L, x, a, b)
     end
 end
 
+# =============================================================================
+# End Condition Behavior Traits
+# =============================================================================
+# Consolidates multiple dispatch on Element{R} into a simpler trait pattern.
+
+abstract type EndConditionBehavior end
+struct SimplySupportedBehavior <: EndConditionBehavior end
+struct FixedFixedBehavior <: EndConditionBehavior end
+
+# Map release types to behavior traits
+_end_behavior(::Element{FreeFree}) = SimplySupportedBehavior()
+_end_behavior(::Element{Joist}) = SimplySupportedBehavior()
+_end_behavior(::Element{FixedFixed}) = FixedFixedBehavior()
+_end_behavior(::Element{FreeFixed}) = SimplySupportedBehavior()  # Approximate as SS
+_end_behavior(::Element{FixedFree}) = SimplySupportedBehavior()  # Approximate as SS
+
 # Helper: moment from partial uniform load on [a, b]
-function _MLine_partial(::Element{FreeFree}, w, L, x, a, b)
-    _MLine_partial_ss(w, L, x, a, b)
+# Single entry point dispatches to trait
+function _MLine_partial(elem::Element, w, L, x, a, b)
+    _MLine_partial(_end_behavior(elem), w, L, x, a, b)
 end
-function _MLine_partial(::Element{Joist}, w, L, x, a, b)
-    _MLine_partial_ss(w, L, x, a, b)
-end
-function _MLine_partial(::Element{FixedFixed}, w, L, x, a, b)
-    _MLine_partial_ff(w, L, x, a, b)
-end
-function _MLine_partial(::Element{FreeFixed}, w, L, x, a, b)
-    _MLine_partial_pf(w, L, x, a, b)
-end
-function _MLine_partial(::Element{FixedFree}, w, L, x, a, b)
-    _MLine_partial_fp(w, L, x, a, b)
-end
+
+# Trait-based dispatch
+_MLine_partial(::SimplySupportedBehavior, w, L, x, a, b) = _MLine_partial_ss(w, L, x, a, b)
+_MLine_partial(::FixedFixedBehavior, w, L, x, a, b) = _MLine_partial_ff(w, L, x, a, b)
 
 # Simply supported partial uniform load moment
 function _MLine_partial_ss(w, L, x, a, b)
@@ -135,15 +144,10 @@ function _MLine_partial_ff(w, L, x, a, b)
     end
 end
 
-# Pinned-fixed (approximate)
-function _MLine_partial_pf(w, L, x, a, b)
-    _MLine_partial_ss(w, L, x, a, b)
-end
-
-# Fixed-pinned (approximate)
-function _MLine_partial_fp(w, L, x, a, b)
-    _MLine_partial_ss(w, L, x, a, b)
-end
+# Note: Pinned-fixed (_pf) and Fixed-pinned (_fp) approximated as simply-supported
+# via the trait system above. These helper functions retained for direct use if needed.
+_MLine_partial_pf(w, L, x, a, b) = _MLine_partial_ss(w, L, x, a, b)
+_MLine_partial_fp(w, L, x, a, b) = _MLine_partial_ss(w, L, x, a, b)
 
 # Helper: shear from partial uniform load on [a, b]
 function _VLine_partial(element, w, L, x, a, b)

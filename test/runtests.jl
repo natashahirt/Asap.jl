@@ -1,12 +1,16 @@
 using Asap
-using StructuralBase: StructuralUnits
 using Test
 using LinearAlgebra
 using Unitful
 
-Unitful.register(StructuralUnits)
+# Register Asap's custom units (kip, ksi, psf, ksf, pcf)
+Unitful.register(Asap)
 
 @testset "Asap Tests" begin
+    # =========================================================================
+    # Units (canonical source for the ecosystem)
+    # =========================================================================
+    include("units/test_units.jl")
     # Core functionality
     include("core.jl")
     

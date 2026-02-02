@@ -232,6 +232,15 @@ function assemble_geometric_stiffness(model::FrameModel)
     return Kg
 end
 
+"""
+    assemble_geometric_stiffness(model::Model) -> SparseMatrixCSC
+
+Assemble global geometric stiffness matrix for unified models (frames + shells).
+
+# Prerequisites
+- Model must be processed (`process!(model)`)
+- Static analysis must be run (`solve!(model)`) to compute internal forces
+"""
 function assemble_geometric_stiffness(model::Model)
     !model.processed && error("Model must be processed. Call process!(model) first.")
     
@@ -383,7 +392,7 @@ function geometric_stiffness(elem::ShellTri3, σ_membrane::Vector{Float64})
     return elem.R' * Kg_local * elem.R
 end
 
-# Support for CompositeShellTri3
+"""Geometric stiffness for composite shells (same formulation as isotropic)."""
 function local_geometric_stiffness(elem::CompositeShellTri3, σ_membrane::Vector{Float64})
     # Same formulation - membrane forces affect out-of-plane stability identically
     Nxx, Nyy, Nxy = σ_membrane[1], σ_membrane[2], σ_membrane[3]
@@ -412,6 +421,7 @@ function local_geometric_stiffness(elem::CompositeShellTri3, σ_membrane::Vector
     return Kg
 end
 
+"""Geometric stiffness for composite shell from solved model."""
 function geometric_stiffness(elem::CompositeShellTri3, model::AbstractModel)
     sif = ShellInternalForces(elem, model.u)
     σ_membrane = [sif.Nxx, sif.Nyy, sif.Nxy]
@@ -485,7 +495,14 @@ function assemble_geometric_stiffness(model::ShellModel, σ_uniform::Vector{Floa
     return Kg
 end
 
-# TrussModel - simplified for axial-only elements
+"""
+    assemble_geometric_stiffness(model::TrussModel) -> SparseMatrixCSC
+
+Assemble global geometric stiffness matrix for truss models.
+
+Uses simplified axial-only formulation where geometric stiffness
+affects transverse stability relative to each element's axis.
+"""
 function assemble_geometric_stiffness(model::TrussModel)
     !model.processed && error("Model must be processed. Call process!(model) first.")
     
