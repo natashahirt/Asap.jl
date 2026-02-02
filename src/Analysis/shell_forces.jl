@@ -228,7 +228,7 @@ end
 Compute principal bending moments and their directions.
 
 # Returns
-- `(M1, M2, θ)`: Principal moments and angle (radians) from local X to first principal direction
+- `(M1=..., M2=..., θ=...)`: NamedTuple with principal moments and angle (radians)
 """
 function principal_moments(sif::ShellInternalForces)
     Mx, My, Mxy = sif.Mxx, sif.Myy, sif.Mxy
@@ -240,7 +240,7 @@ function principal_moments(sif::ShellInternalForces)
     M2 = M_avg - R
     θ = 0.5 * atan(2 * Mxy, Mx - My)
     
-    return (M1, M2, θ)
+    return (M1=M1, M2=M2, θ=θ)
 end
 
 """
@@ -249,7 +249,7 @@ end
 Compute principal membrane forces and their directions.
 
 # Returns
-- `(N1, N2, θ)`: Principal forces and angle (radians)
+- `(N1=..., N2=..., θ=...)`: NamedTuple with principal forces and angle (radians)
 """
 function principal_forces(sif::ShellInternalForces)
     Nx, Ny, Nxy = sif.Nxx, sif.Nyy, sif.Nxy
@@ -261,7 +261,7 @@ function principal_forces(sif::ShellInternalForces)
     N2 = N_avg - R
     θ = 0.5 * atan(2 * Nxy, Nx - Ny)
     
-    return (N1, N2, θ)
+    return (N1=N1, N2=N2, θ=θ)
 end
 
 """

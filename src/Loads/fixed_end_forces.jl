@@ -311,10 +311,10 @@ end
 
 """
 Fixed-end forces for uniform load w over partial span [a, b] on beam of length L.
-Returns (R_A, R_B, M_A, M_B) where positive M is counterclockwise.
+Returns (R_A=..., R_B=..., M_A=..., M_B=...) where positive M is counterclockwise.
 """
 function _fem_uniform_partial(L::Float64, a::Float64, b::Float64, w::Float64)
-    abs(w) < 1e-15 && return (0.0, 0.0, 0.0, 0.0)
+    abs(w) < 1e-15 && return (R_A=0.0, R_B=0.0, M_A=0.0, M_B=0.0)
     
     # Integrals for fixed-fixed beam FEMs
     # R_A = ∫[a,b] w*(L-x)²*(L+2x)/L³ dx
@@ -352,17 +352,18 @@ function _fem_uniform_partial(L::Float64, a::Float64, b::Float64, w::Float64)
     I_MB(x) = L*x^3/3 - x^4/4
     M_B = w/L2 * (I_MB(b) - I_MB(a))
     
-    return (R_A, R_B, M_A, M_B)
+    return (R_A=R_A, R_B=R_B, M_A=M_A, M_B=M_B)
 end
 
 """
 Fixed-end forces for triangular load (0 at a, w_peak at b) over [a, b] on beam of length L.
+Returns (R_A=..., R_B=..., M_A=..., M_B=...) where positive M is counterclockwise.
 """
 function _fem_triangular_partial(L::Float64, a::Float64, b::Float64, w_peak::Float64)
-    abs(w_peak) < 1e-15 && return (0.0, 0.0, 0.0, 0.0)
+    abs(w_peak) < 1e-15 && return (R_A=0.0, R_B=0.0, M_A=0.0, M_B=0.0)
     
     ℓ = b - a
-    ℓ < 1e-12 && return (0.0, 0.0, 0.0, 0.0)
+    ℓ < 1e-12 && return (R_A=0.0, R_B=0.0, M_A=0.0, M_B=0.0)
     
     # Load function: w(x) = w_peak * (x - a) / ℓ  for a ≤ x ≤ b
     # Need to integrate: w_peak/ℓ * (x - a) * [FEM kernel]
@@ -393,5 +394,5 @@ function _fem_triangular_partial(L::Float64, a::Float64, b::Float64, w_peak::Flo
     I_MB(x) = L*x^4/4 - x^5/5 - a*L*x^3/3 + a*x^4/4
     M_B = (w_peak/ℓ)/L2 * (I_MB(b) - I_MB(a))
     
-    return (R_A, R_B, M_A, M_B)
+    return (R_A=R_A, R_B=R_B, M_A=M_A, M_B=M_B)
 end

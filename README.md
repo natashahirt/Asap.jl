@@ -22,10 +22,13 @@ This is an extended fork of the [original Asap.jl](https://github.com/keithjlee/
 - **Shell elements** - Triangular shell elements with membrane + bending (based on FinEtools)
 - **Composite shells** - Laminated composite materials with ply-level stress recovery
 - **Grounded springs** - Elastic foundation/support modeling
-- **Modal analysis** - Natural frequencies and mode shapes via `modal!`
+- **Modal analysis** - Natural frequencies and mode shapes
+- **Nonlinear analysis** - P-delta, linear buckling, Newton-Raphson pushover
+- **Unified solve! API** - Single entry point with symbol dispatch: `solve!(model, :buckling)`
 - **Mixed models** - Combined frame + shell structures in one model
 - **Tributary areas** - Straight skeleton and Voronoi algorithms for load distribution
 - **Area loads** - Unified surface pressure API for shells
+- **Shell queries** - Spatial queries and region integration for design strips
 - **Force Density Method** - Form-finding for cable/membrane structures
 
 ### Installation
@@ -214,12 +217,17 @@ process!(model)
 add_springs!(model, springs)
 solve!(model)
 
-# Modal analysis
-result = modal!(model; n=10)
-print_modal_summary(result)
+# Modal analysis (unified API)
+modal_result = solve!(model, :modal; n=10)
+print_modal_summary(modal_result)
+
+# Stability check (buckling + P-delta)
+stab = solve!(model, :stability)
+println("\\nBuckling load factor: ", round(stab.buckling.load_factors[1], digits=2))
+println("P-delta amplification: ", round(stab.pdelta.amplification, digits=3))
 
 # Access results
-println("\\nFirst 3 natural frequencies: ", round.(result.frequencies[1:3], digits=2), " Hz")
+println("\\nFirst 3 natural frequencies: ", round.(modal_result.frequencies[1:3], digits=2), " Hz")
 println("Base reaction at corner: ", nodes[1].reaction)
 ```
 
@@ -698,10 +706,38 @@ solve!(model)  # Lateral loads distributed via rigid diaphragm
 
 # Analysis
 
+Asap provides a **unified `solve!` API** with symbol dispatch for all analysis types.
+
+## Unified API
+
+```julia
+# Default: linear static
+solve!(model)                          # K·u = F
+
+# Explicit analysis types
+solve!(model, :static)                 # Linear static
+solve!(model, :modal; n=6)             # Modal analysis  
+solve!(model, :buckling; n=4)          # Linear buckling
+solve!(model, :pdelta; max_iter=10)    # P-delta iteration
+solve!(model, :nonlinear; n_steps=10)  # Newton-Raphson pushover
+
+# Composite analyses (run multiple at once)
+solve!(model, :stability)              # Buckling + P-delta → NamedTuple
+solve!(model, :all)                    # All valid for this model → NamedTuple
+```
+
+**Model-aware dispatch:** `solve!(model, :all)` only runs analyses valid for the model type.
+
+```julia
+available_analyses(frame_model)  # → (:static, :modal, :buckling, :pdelta, :nonlinear)
+available_analyses(shell_model)  # → (:static, :modal)
+available_analyses(truss_model)  # → (:static, :buckling)
+```
+
 ## Static Analysis
 
 ```julia
-solve!(model)  # Process and solve in one call
+solve!(model)  # or solve!(model, :static)
 
 # Access results
 node.displacement  # [Tx, Ty, Tz, Rx, Ry, Rz] with units
@@ -720,9 +756,8 @@ solve!(model; reprocess=true)
 Compute natural frequencies and mode shapes.
 
 ```julia
-# Primary API (auto-processes if needed)
-result = modal!(model)           # 6 modes (default)
-result = modal!(model; n=10)     # 10 modes
+result = solve!(model, :modal)       # 6 modes (default)
+result = solve!(model, :modal; n=10) # 10 modes
 
 # Access results
 result.frequencies   # Natural frequencies [Hz]
@@ -734,10 +769,146 @@ result.omegas        # Angular frequencies [rad/s]
 print_modal_summary(result)
 
 # Mass matrix options
-result = modal!(model; n=6, mass_type=MASS_LUMPED)
+result = solve!(model, :modal; n=6, mass_type=MASS_LUMPED)
+
+# Legacy API still works
+result = modal!(model; n=10)
 ```
 
 Mass types: `MASS_CONSISTENT` (default), `MASS_LUMPED`, `MASS_CONSISTENT_NO_ROTATION`, `MASS_LUMPED_NO_ROTATION`
+
+## Buckling Analysis
+
+Linear buckling eigenvalue problem: (K + λ·Kg)φ = 0
+
+```julia
+result = solve!(model, :buckling; n=4)
+
+# Access results
+result.load_factors  # Critical load multipliers [λ₁, λ₂, ...]
+result.mode_shapes   # Buckling mode shapes
+result.n_modes       # Number of modes computed
+
+# Interpretation
+# λ > 1.0 → Structure is stable under current loads
+# λ < 1.0 → Structure will buckle before reaching full load
+# λ = 1.0 → At critical load
+
+print_buckling_summary(result)
+
+# Convenience functions
+critical_load_factor(model)  # Just λ₁
+is_stable(model)             # λ₁ > 1.0?
+```
+
+**Example: Column buckling check**
+
+```julia
+# Cantilever column under axial load
+nodes = [
+    Node([0u"m", 0u"m", 0u"m"], :fixed),
+    Node([0u"m", 0u"m", 5u"m"], :free)
+]
+column = Element(nodes[1], nodes[2], section)
+load = NodeForce(nodes[2], [0u"N", 0u"N", -500u"kN"])
+
+model = Model(nodes, [column], [load])
+result = solve!(model, :buckling)
+
+if result.load_factors[1] > 1.5
+    println("Column OK with safety factor $(result.load_factors[1])")
+else
+    println("WARNING: Near buckling!")
+end
+```
+
+## P-Delta Analysis
+
+Second-order effects from gravity loads acting through lateral displacements.
+
+```julia
+result = solve!(model, :pdelta; max_iter=10, tol=1e-3)
+
+# Access results
+result.converged      # Did iteration converge?
+result.iterations     # Number of iterations
+result.amplification  # Second-order amplification factor (B₂)
+result.max_drift_ratio
+
+print_pdelta_summary(result)
+
+# AISC B₂ factor directly
+B2 = B2_factor(model)
+```
+
+**When to use P-delta:**
+- Tall buildings (>10 stories)
+- Slender frames
+- When B₂ > 1.1 per AISC 360
+
+**Example: Frame stability check**
+
+```julia
+model = Model(nodes, columns ∪ beams, gravity_loads ∪ lateral_loads)
+result = solve!(model, :pdelta)
+
+if result.amplification > 1.5
+    println("WARNING: Significant P-delta effects")
+    println("Amplification factor: $(round(result.amplification, digits=2))")
+end
+```
+
+## Nonlinear Static Analysis
+
+Full Newton-Raphson with incremental loading—for pushover analysis and capacity curves.
+
+```julia
+result = solve!(model, :nonlinear; n_steps=20, max_iter=20, tol=1e-4)
+
+# Access results
+result.converged           # Did all steps converge?
+result.load_factors        # λ at each step [0, 0.05, 0.10, ...]
+result.displacements       # u at each step
+result.iterations_per_step # Iterations needed
+result.equilibrium_error   # Final residual at each step
+
+print_nonlinear_summary(result)
+
+# Extract capacity curve for plotting
+curve = capacity_curve(result)
+# curve.displacement  # Max displacement at each step
+# curve.load_factor   # Load level at each step
+
+# Alias for seismic assessment
+result = pushover!(model; n_steps=20)
+```
+
+**Example: Pushover capacity curve**
+
+```julia
+# Apply lateral load pattern
+model = Model(nodes, elements, [lateral_load_at_roof])
+result = solve!(model, :nonlinear; n_steps=20)
+
+curve = capacity_curve(result)
+# Plot: curve.displacement vs curve.load_factor
+```
+
+## Stability Check (Composite)
+
+Run buckling + P-delta together for comprehensive stability assessment.
+
+```julia
+results = solve!(model, :stability)
+
+# Access both results
+results.buckling.load_factors[1]  # Critical buckling λ
+results.pdelta.amplification      # P-delta amplification
+
+# Quick summary
+println("Buckling λ₁ = ", results.buckling.load_factors[1])
+println("P-delta B₂ = ", results.pdelta.amplification)
+```
 
 ---
 
@@ -773,9 +944,84 @@ forces.Nxx, forces.Nyy, forces.Nxy
 # Bending moments [N*m/m]  
 forces.Mxx, forces.Myy, forces.Mxy
 
-# Principal values
-M1, M2, θ = principal_moments(forces)
+# Principal values (returns NamedTuple)
+pm = principal_moments(forces)  # (M1=..., M2=..., θ=...)
+pm.M1, pm.M2, pm.θ              # Named access
+M1, M2, θ = principal_moments(forces)  # Destructuring also works
+
+pf = principal_forces(forces)   # (N1=..., N2=..., θ=...)
 σ_vm = von_mises_stress(forces, shell.thickness)
+```
+
+## Shell Queries & Region Integration
+
+Query shell results by location or integrate over regions—essential for design strip calculations.
+
+### Spatial Queries
+
+```julia
+# Find shell triangles at a point (returns all touching triangles)
+tris = shell_tris_at_point(model, (5.0, 3.0); tol=0.01)
+
+# Find triangles whose centroids fall in a polygon
+column_strip = [(0.0, 0.0), (10.0, 0.0), (10.0, 2.5), (0.0, 2.5)]
+tris = shell_tris_in_region(model, column_strip)
+
+# Get element centroid (returns NamedTuple)
+c = shell_centroid(shell)      # (x=..., y=...)
+c.x, c.y                       # Named access
+cx, cy = shell_centroid(shell) # Destructuring also works
+
+c3d = shell_centroid_3d(shell) # (x=..., y=..., z=...)
+```
+
+### Bending Moments
+
+Multiple dispatch patterns for querying moments:
+
+```julia
+# Single element
+M = bending_moments(shell, model)  # Returns [Mxx, Myy, Mxy]
+
+# Multiple elements
+Ms = bending_moments(shells, model)  # Returns Vector{[Mxx, Myy, Mxy]}
+
+# At a point (averages if multiple triangles touch the point)
+M = bending_moments(model, (5.0, 3.0); tol=0.01)
+
+# Integrate over a region (polygon)
+strip = [(0.0, 0.0), (10.0, 0.0), (10.0, 2.5), (0.0, 2.5)]
+result = bending_moments(model; polygon=strip)
+# Returns NamedTuple:
+#   result.Mxx, .Myy, .Mxy         - Area-weighted totals
+#   result.Mxx_avg, .Myy_avg, ...  - Average moment intensity (N·m/m)
+#   result.Mxx_max, .Myy_max, ...  - Peak absolute values
+#   result.area                    - Total integrated area (m²)
+#   result.shell_tris              - Shells in the region
+
+# Query multiple points
+pts = [(1.0, 1.0), (5.0, 5.0), (9.0, 9.0)]
+moments = bending_moments(model; pts=pts, tol=0.01)
+
+# From a filtered element set (e.g., specific slab)
+slab_tris = shell_tris_in_region(model, slab_boundary)
+result = bending_moments(slab_tris, model; polygon=strip_boundary)
+```
+
+### Design Strip Workflow
+
+Typical workflow for ACI-style design strip analysis:
+
+```julia
+# 1. Define strip geometry (column strip, middle strip, etc.)
+column_strip = [(x1, y1), (x2, y2), (x3, y3), (x4, y4)]
+
+# 2. Integrate FEA moments over strip region
+result = bending_moments(model; polygon=column_strip)
+
+# 3. Use results for reinforcement design
+Mu_design = result.Mxx_max  # Peak moment for strength design
+Mu_avg = result.Mxx_avg     # Average for minimum steel calculation
 ```
 
 ## Displacements

@@ -57,4 +57,13 @@ Unitful.register(StructuralUnits)
         include("integration_and_api/test_new_api.jl")
         include("integration_and_api/test_load_approaches.jl")
     end
+    
+    # =========================================================================
+    # Nonlinear Analysis
+    # =========================================================================
+    @testset "Nonlinear Analysis" begin
+        include("nonlinear/test_buckling.jl")
+        include("nonlinear/test_pdelta.jl")
+        include("nonlinear/test_nonlinear_statics.jl")
+    end
 end

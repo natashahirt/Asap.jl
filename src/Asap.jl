@@ -139,6 +139,9 @@ include("Model/analysis.jl")
 export process!
 export solve!
 export solve
+export ANALYSIS_TYPES
+export available_analyses
+export supports_analysis
 export to_displacement_vec
 export to_reaction_vec
 export assemble_stiffness
@@ -147,16 +150,44 @@ export populate_globalID!
 export add_springs!
 
 # DYNAMICS - Modal analysis (requires Model to be defined)
+# Primary API: solve!(model, :modal)
 include("Dynamics/modal.jl")
 export ModalResult
 export modal_analysis
-export modal!
+export modal!                 # or solve!(model, :modal)
 export modal
 export natural_frequencies
 export mode_shapes
 export assemble_mass_matrix
 export assemble_mass_matrix!
 export print_modal_summary
+
+# NONLINEAR ANALYSIS - P-delta, buckling, nonlinear statics
+# Primary API: solve!(model, :buckling), solve!(model, :pdelta), etc.
+include("Nonlinear/_nonlinear.jl")
+# Result types
+export BucklingResult
+export PDeltaResult
+export NonlinearResult
+# Geometric stiffness (advanced use)
+export local_geometric_stiffness
+export geometric_stiffness
+export assemble_geometric_stiffness
+# Direct solver access (also available via solve!(model, :symbol))
+export solve_buckling!        # or solve!(model, :buckling)
+export solve_pdelta!          # or solve!(model, :pdelta)
+export solve_nonlinear!       # or solve!(model, :nonlinear)
+# Convenience functions
+export critical_load_factor
+export is_stable
+export amplification_factor
+export B2_factor
+export pushover!
+export capacity_curve
+# Summary printing
+export print_buckling_summary
+export print_pdelta_summary
+export print_nonlinear_summary
 
 # FORCE DENSITY METHOD
 include("FDM/FDM.jl")
@@ -176,6 +207,7 @@ include("Analysis/force_functions.jl")
 include("Analysis/force_analysis.jl")
 include("Analysis/displacements.jl")
 include("Analysis/shell_forces.jl")
+include("Analysis/shell_queries.jl")
 export etype2DOF
 export planarDOFs
 export groupbyid
@@ -197,6 +229,11 @@ export max_deflection
 # Unified interface (dispatches to ElementInternalForces or ShellInternalForces)
 export InternalForces
 export Displacements
+# Shell spatial queries and region integration
+export shell_centroid
+export shell_centroid_3d
+export shell_tris_at_point
+export shell_tris_in_region
 
 # TRIBUTARY AREA COMPUTATION
 include("Tributary/_tributary.jl")
