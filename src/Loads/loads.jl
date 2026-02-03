@@ -283,6 +283,79 @@ function AreaLoad(
 end
 
 """
+    AreaLoad(shells, load_vector; ...)
+
+Create an area load from a 3D load vector (pressure × direction combined).
+
+This is a convenience interface where the load vector encodes both magnitude
+and direction: `[px, py, pz]` where the magnitude is `sqrt(px² + py² + pz²)`
+and direction is the normalized vector.
+
+# Examples
+```julia
+# 90 Pa downward (Z-)
+load = AreaLoad(shells, [0, 0, -90]u"Pa")
+
+# 50 Pa at 45° in XZ plane
+load = AreaLoad(shells, [35.36, 0, -35.36]u"Pa")
+
+# Using N/m² (same as Pa)
+load = AreaLoad(shells, [0, 0, -5000]u"N/m^2")
+```
+
+This is equivalent to:
+```julia
+magnitude = norm([px, py, pz])
+direction = [px, py, pz] / magnitude
+AreaLoad(shells, magnitude; direction=Tuple(direction))
+```
+"""
+function AreaLoad(
+    shells::Vector{S},
+    load_vector::AbstractVector{<:Quantity};
+    distribute_to::Union{Symbol, Vector{<:FrameElement}} = :nodes,
+    interior_beams::Vector{<:FrameElement} = FrameElement[],
+    axis::Union{Nothing, NTuple{2, <:Real}, Vector{<:Real}} = nothing,
+    id::Symbol = :areaload
+) where S <: ShellElement
+    length(load_vector) == 3 || error("Load vector must have 3 components [px, py, pz]")
+    
+    # Convert to Pa and extract components
+    px = ustrip(u"Pa", load_vector[1])
+    py = ustrip(u"Pa", load_vector[2])
+    pz = ustrip(u"Pa", load_vector[3])
+    
+    # Compute magnitude and direction
+    magnitude = sqrt(px^2 + py^2 + pz^2)
+    
+    if magnitude < 1e-12
+        # Zero load - use default direction
+        direction = (0.0, 0.0, -1.0)
+        pressure = 0.0u"Pa"
+    else
+        direction = (px / magnitude, py / magnitude, pz / magnitude)
+        pressure = magnitude * u"Pa"
+    end
+    
+    return AreaLoad(shells, pressure; 
+        distribute_to=distribute_to, 
+        interior_beams=interior_beams, 
+        axis=axis, 
+        direction=direction,
+        id=id
+    )
+end
+
+# Vector form for single shell
+function AreaLoad(
+    shell::ShellElement,
+    load_vector::AbstractVector{<:Quantity};
+    kwargs...
+)
+    AreaLoad([shell], load_vector; kwargs...)
+end
+
+"""
     nodal_forces(load::AreaLoad) -> Vector{Tuple{Node, Vector{Float64}}}
 
 Compute equivalent nodal forces for an area load (FEM distribution).
