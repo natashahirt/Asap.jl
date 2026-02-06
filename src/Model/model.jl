@@ -224,12 +224,15 @@ mutable struct Model <: AbstractModel
         loads::Vector{L}
     ) where {E1<:FrameElement, E2<:ShellElement, L<:AbstractLoad}
         
-        nnodes = length(nodes)
+        # Merge shell nodes into nodes list (shells may have interior mesh nodes)
+        all_nodes = _merge_shell_nodes(nodes, shell_elements)
+        
+        nnodes = length(all_nodes)
         n_frame = length(frame_elements)
         n_shell = length(shell_elements)
 
         new(
-            nodes,
+            all_nodes,
             frame_elements,
             shell_elements,
             loads,
@@ -250,6 +253,33 @@ mutable struct Model <: AbstractModel
             false
         )
     end
+end
+
+"""
+    _merge_shell_nodes(nodes, shell_elements)
+
+Merge shell element nodes into the nodes list, adding any interior mesh nodes
+that aren't already present. Uses object identity to avoid duplicates.
+"""
+function _merge_shell_nodes(nodes::Vector{Node}, shell_elements::Vector{<:ShellElement})
+    isempty(shell_elements) && return nodes
+    
+    # Track existing nodes by identity
+    seen = Set{UInt64}(objectid(n) for n in nodes)
+    merged = copy(nodes)
+    
+    # Add unique shell nodes not already in the list
+    for elem in shell_elements
+        for node in elem.nodes
+            id = objectid(node)
+            if !(id in seen)
+                push!(seen, id)
+                push!(merged, node)
+            end
+        end
+    end
+    
+    return merged
 end
 
 # Convenience constructor: Frame elements only

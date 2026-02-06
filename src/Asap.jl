@@ -160,6 +160,8 @@ export compute_voronoi_tributaries
 export get_polygon_span
 export governing_spans
 export short_span, long_span, two_way_span
+# Polygon utilities
+export is_convex_polygon
 
 # Shell-to-beam load distribution (requires Tributary)
 include("Loads/shell_loads.jl")

@@ -233,7 +233,7 @@ function Diaphragm(
     boundary_pts = [(ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2])) 
                     for node in corners]
     
-    all_points, _ = _generate_mesh_points_with_supports(boundary_pts, n, _SupportLine[])
+    all_points, _, _ = _generate_mesh_points_with_supports(boundary_pts, n, _SupportLine[])
     
     boundary_loop = vcat(collect(1:nc), [1])
     tri = DT.triangulate(all_points; boundary_nodes=[boundary_loop])
@@ -370,7 +370,7 @@ function mesh(
     support_lines = [_to_support_line(s) for s in interior_supports]
     
     # Generate all points (boundary + interior + support lines) without duplicates
-    all_points, support_point_indices = _generate_mesh_points_with_supports(boundary_pts, n, support_lines)
+    all_points, support_point_indices, _ = _generate_mesh_points_with_supports(boundary_pts, n, support_lines)
     
     # Build constrained triangulation
     boundary_loop = vcat(collect(1:nc), [1])
@@ -382,7 +382,7 @@ end
 # ============================================================================
 
 """
-    Shell(corners, section; n=4, id=:shell, interior_supports=[], edge_support_type=:pinned, interior_support_type=:pinned)
+    Shell(corners, section; n=4, id=:shell, interior_supports=[], interior_nodes=[], edge_support_type=:pinned, interior_support_type=:pinned)
     Shell(corners, n, section; ...)
 
 Create triangular shell elements from any polygon with support conditions.
@@ -394,7 +394,11 @@ Create triangular shell elements from any polygon with support conditions.
 
 # Keyword Arguments
 - `id::Symbol`: Element identifier (default: `:shell`)
-- `interior_supports`: List of interior support lines - Elements or (Node, Node) pairs
+- `interior_supports`: List of interior support lines - Elements or (Node, Node) pairs. 
+  Creates new mesh nodes with specified fixity along these lines.
+- `interior_nodes::Vector{Node}`: Actual Node objects to embed in the mesh. Unlike 
+  `interior_supports`, these exact node objects are used (not copies), enabling true 
+  structural connectivity with frame elements sharing the same nodes.
 - `edge_support_type::Symbol`: Fixity for edge nodes (default: `:pinned`)
 - `interior_support_type::Symbol`: Fixity for interior support line nodes (default: `:pinned`)
 
@@ -412,12 +416,21 @@ section = ShellSection(0.15u"m", 30u"GPa", 0.2)
 # Simple slab (edges supported)
 shells = Shell((n1, n2, n3, n4), section)
 
-# Multi-bay slab with interior beam
+# Multi-bay slab with interior beam (creates new support nodes)
 shells = Shell((n1, n2, n3, n4), section;
     interior_supports = [interior_beam],
     edge_support_type = :pinned,
     interior_support_type = :pinned
 )
+
+# Slab with interior column (shares actual node for structural connectivity)
+col_top = Node([2.0u"m", 2.0u"m", 0.0u"m"], :free)
+column = Element(col_base, col_top, col_section)
+shells = Shell((n1, n2, n3, n4), section;
+    interior_nodes = [col_top],  # Same node object used by column!
+    edge_support_type = :free
+)
+model = Model(nodes, [column], shells, loads)  # True frame-shell connectivity
 
 model = ShellModel(get_nodes(shells), shells, loads)
 ```
@@ -428,6 +441,7 @@ function Shell(
     section::ShellSection;
     id::Symbol = :shell,
     interior_supports::Vector = [],
+    interior_nodes::Vector{Node} = Node[],
     edge_support_type::Union{Symbol, Vector{Bool}} = :pinned,
     interior_support_type::Union{Symbol, Vector{Bool}} = :pinned
 ) where N
@@ -457,8 +471,13 @@ function Shell(
     # Convert interior supports to _SupportLine
     support_lines = [_to_support_line(s) for s in interior_supports]
     
-    # Generate mesh points with supports
-    all_points, support_point_indices = _generate_mesh_points_with_supports(boundary_pts, n, support_lines)
+    # Extract interior node positions for mesh generation (type annotation needed for empty arrays)
+    interior_node_pts = Tuple{Float64, Float64}[(ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2])) 
+                         for node in interior_nodes]
+    
+    # Generate mesh points with supports and interior nodes
+    all_points, support_point_indices, interior_node_map = _generate_mesh_points_with_supports(
+        boundary_pts, n, support_lines, interior_node_pts)
     
     # Build constrained triangulation
     boundary_loop = vcat(collect(1:nc), [1])
@@ -485,8 +504,16 @@ function Shell(
         node_map[i] = corner
     end
     
-    # Create non-corner nodes
+    # Map interior nodes to their point indices (use actual node objects for structural connectivity)
+    for (input_idx, point_idx) in interior_node_map
+        node_map[point_idx] = interior_nodes[input_idx]
+    end
+    
+    # Create non-corner, non-interior-node nodes
     for i in (nc+1):length(points)
+        # Skip if already mapped (interior node)
+        haskey(node_map, i) && continue
+        
         pt = points[i]
         pos = [pt[1], pt[2], z_val] .* u"m"
         
@@ -516,12 +543,14 @@ function Shell(
     n::Int = 4,
     id::Symbol = :shell,
     interior_supports::Vector = [],
+    interior_nodes::Vector{Node} = Node[],
     edge_support_type::Union{Symbol, Vector{Bool}} = :pinned,
     interior_support_type::Union{Symbol, Vector{Bool}} = :pinned
 ) where N
     return Shell(corners, n, section; 
         id=id, 
         interior_supports=interior_supports,
+        interior_nodes=interior_nodes,
         edge_support_type=edge_support_type,
         interior_support_type=interior_support_type
     )
@@ -1064,13 +1093,17 @@ function _create_shells_from_tri(
 end
 
 """
-Generate mesh points including support line points.
-Returns (all_points, support_point_indices).
+Generate mesh points including support line points and interior nodes.
+Returns (all_points, support_point_indices, interior_node_point_indices).
+
+The third return value maps input interior node index → output point index,
+allowing the caller to reuse actual Node objects instead of creating new ones.
 """
 function _generate_mesh_points_with_supports(
     boundary_pts::Vector{Tuple{Float64, Float64}}, 
     n::Int,
-    support_lines::Vector{_SupportLine}
+    support_lines::Vector{_SupportLine},
+    interior_node_pts::Vector{Tuple{Float64, Float64}} = Tuple{Float64, Float64}[]
 )
     nc = length(boundary_pts)
     
@@ -1078,13 +1111,25 @@ function _generate_mesh_points_with_supports(
     tol = 1e-6
     round_coord(x) = round(Int64, x / tol)
     
-    # Use a dict to dedupe: key is rounded coords, value is (exact coords, is_support)
-    points_dict = Dict{Tuple{Int64, Int64}, Tuple{Tuple{Float64, Float64}, Bool}}()
+    # Use a dict to dedupe: key is rounded coords, value is (exact coords, is_support, interior_node_idx)
+    # interior_node_idx=0 means not an interior node
+    points_dict = Dict{Tuple{Int64, Int64}, Tuple{Tuple{Float64, Float64}, Bool, Int}}()
     
-    # Add boundary points first (these take priority, not supports)
+    # Add boundary points first (these take priority)
     for pt in boundary_pts
         key = (round_coord(pt[1]), round_coord(pt[2]))
-        points_dict[key] = (pt, false)
+        points_dict[key] = (pt, false, 0)
+    end
+    
+    # Add interior node points (these are actual nodes we want to embed)
+    for (idx, pt) in enumerate(interior_node_pts)
+        key = (round_coord(pt[1]), round_coord(pt[2]))
+        if !haskey(points_dict, key)
+            # Only add if inside polygon or on boundary
+            if _point_inside_polygon(pt, boundary_pts) || _is_on_boundary_edge(pt, boundary_pts, tol)
+                points_dict[key] = (pt, false, idx)  # Track which interior node
+            end
+        end
     end
     
     # Add support line points
@@ -1095,7 +1140,7 @@ function _generate_mesh_points_with_supports(
             if !haskey(points_dict, key)
                 # Only add if inside polygon
                 if _point_inside_polygon(pt, boundary_pts) || _is_on_boundary_edge(pt, boundary_pts, tol)
-                    points_dict[key] = (pt, true)  # Mark as support point
+                    points_dict[key] = (pt, true, 0)  # Mark as support point
                 end
             end
         end
@@ -1105,18 +1150,23 @@ function _generate_mesh_points_with_supports(
         # Build result with support tracking
         result = collect(boundary_pts)
         support_indices = Set{Int}()
+        interior_node_map = Dict{Int, Int}()  # input idx → point idx
         
-        for (key, (pt, is_support)) in points_dict
+        for (key, (pt, is_support, interior_idx)) in points_dict
             is_boundary = any(abs(pt[1] - bp[1]) < tol && abs(pt[2] - bp[2]) < tol for bp in boundary_pts)
             if !is_boundary
                 push!(result, pt)
+                point_idx = length(result)
                 if is_support
-                    push!(support_indices, length(result))
+                    push!(support_indices, point_idx)
+                end
+                if interior_idx > 0
+                    interior_node_map[interior_idx] = point_idx
                 end
             end
         end
         
-        return result, support_indices
+        return result, support_indices, interior_node_map
     end
     
     # Compute bounding box
@@ -1138,7 +1188,7 @@ function _generate_mesh_points_with_supports(
             pt = (p1[1] * (1-t) + p2[1] * t, p1[2] * (1-t) + p2[2] * t)
             key = (round_coord(pt[1]), round_coord(pt[2]))
             if !haskey(points_dict, key)
-                points_dict[key] = (pt, false)
+                points_dict[key] = (pt, false, 0)
             end
         end
     end
@@ -1153,7 +1203,7 @@ function _generate_mesh_points_with_supports(
             if _point_inside_polygon(pt, boundary_pts)
                 key = (round_coord(pt[1]), round_coord(pt[2]))
                 if !haskey(points_dict, key)
-                    points_dict[key] = (pt, false)
+                    points_dict[key] = (pt, false, 0)
                 end
             end
         end
@@ -1162,18 +1212,23 @@ function _generate_mesh_points_with_supports(
     # Build result: boundary points first, then others
     result = collect(boundary_pts)
     support_indices = Set{Int}()
+    interior_node_map = Dict{Int, Int}()  # input idx → point idx
     
-    for (key, (pt, is_support)) in points_dict
+    for (key, (pt, is_support, interior_idx)) in points_dict
         is_boundary = any(abs(pt[1] - bp[1]) < tol && abs(pt[2] - bp[2]) < tol for bp in boundary_pts)
         if !is_boundary
             push!(result, pt)
+            point_idx = length(result)
             if is_support
-                push!(support_indices, length(result))
+                push!(support_indices, point_idx)
+            end
+            if interior_idx > 0
+                interior_node_map[interior_idx] = point_idx
             end
         end
     end
     
-    return result, support_indices
+    return result, support_indices, interior_node_map
 end
 
 """

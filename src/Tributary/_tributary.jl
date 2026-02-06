@@ -3,8 +3,10 @@
 # Edge Tributaries: Straight Skeleton (DCEL) and One-Way Directed
 # Vertex Tributaries: Voronoi Tessellation (for column sizing)
 # Span Calculations: Polygon span analysis
+# Polygon Utilities: Convexity checking, etc.
 
 include("utils.jl")
+include("polygon_utils.jl")
 include("dcel.jl")
 include("isotropic.jl")
 include("one_way.jl")
