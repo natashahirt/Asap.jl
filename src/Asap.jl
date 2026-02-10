@@ -14,10 +14,10 @@ include("Units/units.jl")
 export kip, ksi, psf, ksf, pcf
 
 # Physical constants
-export GRAVITY, STANDARD_GRAVITY, STANDARD_GRAVITY_F64
+export GRAVITY
 
 # Dimension-based type aliases (for function signatures)
-export Length, Area, Volume
+export Length, Area, Volume, SectionModulus
 export SecondMomentOfArea, TorsionalConstant, MomentOfInertia, WarpingConstant
 export Pressure, Force, Moment, Torque
 export LinearLoad, AreaLoadQuantity, Density, Acceleration
@@ -26,8 +26,6 @@ export LinearLoad, AreaLoadQuantity, Density, Acceleration
 export LengthQuantity, AreaQuantity, VolumeQuantity
 export PressureQuantity, ForceQuantity, MomentQuantity, ForcePerLength
 
-# Legacy/internal type aliases
-export Distance, QuantityDistance, QuantityForce, QuantityPressure, QuantityDensity, QuantityAcceleration
 
 # Unit conversion helpers - US Customary
 export to_inches, to_sqinches, to_ksi, to_kip, to_kipft
@@ -36,6 +34,9 @@ export to_inches, to_sqinches, to_ksi, to_kip, to_kipft
 export to_meters, to_meters_squared, to_meters_fourth
 export to_pascals, to_newtons, to_newton_meters, to_newtons_per_meter
 export to_kg_per_m3, to_m_per_s2
+
+# Float64 conversion factors (for catalog parsing without Rational overflow)
+export IN_TO_M, IN2_TO_M2, IN3_TO_M3, IN4_TO_M4, IN6_TO_M6
 
 # Catalog parsing utilities
 export asfloat, maybe_asfloat
@@ -49,11 +50,11 @@ const globalX::Vector{Float64} = [1., 0., 0.]
 const globalY::Vector{Float64} = [0., 1., 0.]
 const globalZ::Vector{Float64} = [0., 0., 1.]
 
-include("Materials_Sections/material.jl")
-include("Materials_Sections/section.jl")
-include("Materials_Sections/layup.jl")  # Composite laminate definitions
-# Note: Material is internal (use StructuralSizer materials with to_asap_section()).
+include("Materials/material.jl")
+include("Sections/section.jl")
+include("Materials/layup.jl")
 # ShellMaterial is exported as a convenience type for shell elements.
+export AbstractCrossSection
 export Section
 export TrussSection
 export ShellMaterial
@@ -69,6 +70,29 @@ export laminate_stiffnesses
 export laminate_transverse_shear_stiffness
 export laminate_inertias
 export symmetric_laminate
+
+# =============================================================================
+# POLYGONAL SECTIONS (AsapSections)
+# =============================================================================
+# Arbitrary polygonal cross-section geometry: area, inertia, centroid, plastic
+# moduli, and Sutherland-Hodgman depth/compression-zone analysis.
+include("Sections/AsapSections/AsapSections.jl")
+using .AsapSections
+# Types
+export AbstractPolygonalSection, PolygonalSection
+export SolidSection, VoidSection, CompoundSection, OffsetSection
+export SectionProperties
+# Geometry utilities
+export poly_area
+export center_at_centroid!
+export rotate_section!
+export translate_section!
+# Depth / compression-zone analysis
+export sutherland_hodgman, sutherland_hodgman_abs
+export intersection
+export depth_map, depth_map_abs
+export area_from_depth, area_from_depth_abs
+export depth_from_area
 
 include("Nodes/nodes.jl")
 include("Nodes/utilities.jl")
@@ -88,6 +112,11 @@ include("Elements/utilities.jl")
 export Element
 export BridgeElement
 export TrussElement
+export Release
+export FixedFixed
+export FixedFree
+export FreeFixed
+export FreeFree
 export has_eccentricity
 export ShellElement
 export ShellTri3
@@ -98,6 +127,7 @@ export translational_stiffness
 export rotational_stiffness
 # Shell creation
 export ShellSection
+export ShellPatch
 export Shell
 export mesh
 export get_nodes
@@ -194,6 +224,8 @@ include("Model/analysis.jl")
 export process!
 export solve!
 export solve
+export factorize!, clear_factorization!
+export _reprocess_stiffness_and_loads!
 export ANALYSIS_TYPES
 export available_analyses
 export supports_analysis
@@ -249,15 +281,16 @@ include("Analysis/translations.jl")
 include("Analysis/force_functions.jl")
 include("Analysis/force_analysis.jl")
 include("Analysis/displacements.jl")
+include("Analysis/force_displacement.jl")
 include("Analysis/shell_forces.jl")
 include("Analysis/shell_queries.jl")
 export etype2DOF
 export planarDOFs
 export groupbyid
-export ElementInternalForces
+export ElementInternalForces, ElementForceAndDisplacement, ElementProps
 export ForceEnvelopes
 export load_envelopes
-export get_elemental_loads
+export get_elemental_loads, clear_elemental_loads!
 export ElementDisplacements
 export displacements
 # Shell internal forces

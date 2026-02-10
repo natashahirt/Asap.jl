@@ -29,8 +29,6 @@
     # Physical constants
     @testset "Physical Constants" begin
         @test GRAVITY ≈ 9.80665u"m/s^2"
-        @test STANDARD_GRAVITY == GRAVITY
-        @test STANDARD_GRAVITY_F64 ≈ 9.80665
     end
 end
 
@@ -47,6 +45,7 @@ end
         
         @test 1.0u"m^3" isa Volume
         @test 1.0u"ft^3" isa Volume
+        @test 1.0u"m^3" isa SectionModulus  # Alias for Volume (L³)
         
         @test 1.0u"Pa" isa Pressure
         @test 1.0ksi isa Pressure

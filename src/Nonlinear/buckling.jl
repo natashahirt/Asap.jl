@@ -87,7 +87,7 @@ function _solve_buckling_eigen(K_ff::Matrix{Float64}, Kg_ff::Matrix{Float64},
     
     # Normalize mode shapes (unit max displacement)
     for i in 1:n
-        max_val = maximum(abs.(mode_shapes_full[:, i]))
+        max_val = mapreduce(abs, max, @view mode_shapes_full[:, i])
         if max_val > 1e-10
             mode_shapes_full[:, i] ./= max_val
         end

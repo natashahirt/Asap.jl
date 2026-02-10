@@ -173,7 +173,7 @@ end
 
 function transfer!(load::LineLoad, id::Int64, inout::Bool, model::Model, elementids::Vector{Int64}, newloads::Vector{AbstractLoad})
 
-    if !inout && typeof(load.element) <: Element
+    if !inout && load.element isa Element
         return
     end
 
@@ -188,8 +188,7 @@ function transfer!(load::LineLoad, id::Int64, inout::Bool, model::Model, element
 end
 
 function transfer!(load::PointLoad, id::Int64, inout::Bool, model::Model, elementids::Vector{Int64}, newloads::Vector{AbstractLoad})
-    etype = typeof(load.element)
-    typecheck = etype <: Element
+    typecheck = load.element isa Element
 
     if !inout && typecheck
         return
@@ -234,8 +233,8 @@ function convertloads!(model::Model, itrue::Vector{Int64})
 
     for (index, load) in enumerate(model.loads)
 
-        #conversions only aplly to elemental loads
-        typeof(load) <: NodeForce && continue
+        #conversions only apply to elemental loads
+        load isa NodeForce && continue
 
         #id of element load was applied to
         id = load.element.elementID
@@ -244,7 +243,7 @@ function convertloads!(model::Model, itrue::Vector{Int64})
         inout = in(id, itrue)
 
         #remove the existing load if applied to sh
-        if inout || (typeof(load.element) <: BridgeElement)
+        if inout || (load.element isa BridgeElement)
             push!(rmid, index)
         end
 
@@ -264,8 +263,8 @@ function processBridge!(model::Model)
     elements = model.elements
 
     #indices of regular and bridge elements
-    iElement = findall(typeof.(elements) .<: Element)
-    iBridge = findall(typeof.(elements) .<: BridgeElement)
+    iElement = findall(e -> e isa Element, elements)
+    iBridge = findall(e -> e isa BridgeElement, elements)
 
     #get geometric information
     process_elements!(elements[iElement])
@@ -323,8 +322,8 @@ function process_bridge!(model::Model)
 
     elements = model.elements
 
-    iElement = findall(typeof.(elements) <: Element)
-    iBridge = findall(typeof.(elements) .<: BridgeElement)
+    iElement = findall(e -> e isa Element, elements)
+    iBridge = findall(e -> e isa BridgeElement, elements)
 
     process_elements!(Vector{Element}(elements[iElement]))
 
@@ -482,7 +481,7 @@ function process_bridge!(model::Model)
         id = load.element.elementID
         in(id, itrueactive) && push!(rmid, index)
 
-        if typeof(load) <: LineLoad
+        if load isa LineLoad
             # IF APPLIED TO A SHATTERED ELEMENT
             if in(id, itrueactive)
                 itransfer = findall(elementids .== id)
@@ -494,7 +493,7 @@ function process_bridge!(model::Model)
                     push!(newloads, newload)
                 end
 
-            elseif typeof(load.element) <: BridgeElement #IF APPLIED TO A BRIDGE ELEMENT
+            elseif load.element isa BridgeElement #IF APPLIED TO A BRIDGE ELEMENT
                 push!(rmid, index)
 
                 itransfer = findfirst(elementids .== id)
@@ -503,9 +502,9 @@ function process_bridge!(model::Model)
                 newload.id = load.id
                 push!(newloads, newload)
             end
-        elseif typeof(load) <: PointLoad
+        elseif load isa PointLoad
 
-            if typeof(load.element) <: Element
+            if load.element isa Element
 
                 if in(id, itrueactive)
 

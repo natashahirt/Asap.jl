@@ -12,7 +12,7 @@ A force vector [Fx, Fy, Fz] in the global coordinate system applied to a node.
 """
 mutable struct NodeForce <: NodeLoad
     node::Union{Node, TrussNode}
-    value::Vector{QuantityForce}
+    value::Vector{Force}
     loadID::Int64
     id::Symbol
     
@@ -81,7 +81,7 @@ Generates distributed load w = element.section.A * element.section.ρ * factor, 
 """
 mutable struct GravityLoad{R<:Release} <: ElementLoad{R}
     element::FrameElement
-    factor::QuantityAcceleration
+    factor::Acceleration
     loadID::Int64
     id::Symbol
 
@@ -103,7 +103,7 @@ A point load [Px, Py, Pz] applied in the global coordinate system at a distance 
 mutable struct PointLoad{R<:Release} <: ElementLoad{R}
     element::FrameElement
     position::Float64  # Dimensionless fraction
-    value::Vector{QuantityForce}
+    value::Vector{Force}
     loadID::Int64
     id::Symbol
 
@@ -141,10 +141,12 @@ mutable struct TributaryLoad{R<:Release} <: ElementLoad{R}
     element::FrameElement
     positions::Vector{Float64}       # Breakpoints [0, s1, s2, ..., 1], normalized
     widths::Vector{Length}           # Tributary widths at each position (m)
-    pressure::QuantityPressure       # Load intensity (Pa)
+    pressure::Pressure       # Load intensity (Pa)
     direction::NTuple{3, Float64}    # Unit load direction
     loadID::Int64
     id::Symbol
+    _widths_m::Vector{Float64}       # Pre-stripped widths in meters (avoids ustrip per call)
+    _pressure_Pa::Float64            # Pre-stripped pressure in Pa
 
     function TributaryLoad(
         element::FrameElement{R},
@@ -171,7 +173,11 @@ mutable struct TributaryLoad{R<:Release} <: ElementLoad{R}
         # Convert pressure to Pa
         pressure_si = uconvert(u"Pa", pressure)
         
-        load = new{R}(element, positions, widths_si, pressure_si, dir_norm, 0, id)
+        # Pre-strip for hot-path use
+        wm = [ustrip(u"m", w) for w in widths_si]
+        pPa = ustrip(u"Pa", pressure_si)
+        
+        load = new{R}(element, positions, widths_si, pressure_si, dir_norm, 0, id, wm, pPa)
         return load
     end
 end
@@ -233,7 +239,7 @@ load = AreaLoad(shells, 5000u"Pa"; distribute_to=beams, axis=(1.0, 0.0))
 """
 mutable struct AreaLoad <: AbstractLoad
     shells::Vector{<:ShellElement}
-    pressure::QuantityPressure
+    pressure::Pressure
     direction::NTuple{3, Float64}
     distribute_to::Union{Symbol, Vector{<:FrameElement}}
     interior_beams::Vector{<:FrameElement}

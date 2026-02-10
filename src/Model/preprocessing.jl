@@ -209,8 +209,10 @@ end
 Populate the global load vector `model.P` with a nodal force.
 """
 function populate_load!(model::AbstractModel, load::NodeForce)
-    idx = load.node.globalID[1:3]
-    model.P[idx] += [to_newtons(v) for v in load.value]
+    gid = load.node.globalID
+    @inbounds for i in 1:3
+        model.P[gid[i]] += to_newtons(load.value[i])
+    end
 end
 
 """
@@ -219,8 +221,10 @@ end
 Populate the global load vector P with a nodal force.
 """
 function populate_load!(P::Vector{Float64}, load::NodeForce)
-    idx = load.node.globalID[1:3]
-    P[idx] += [to_newtons(v) for v in load.value]
+    gid = load.node.globalID
+    @inbounds for i in 1:3
+        P[gid[i]] += to_newtons(load.value[i])
+    end
 end
 
 """
@@ -229,8 +233,10 @@ end
 Populate the global load vector `model.P` with a nodal moment.
 """
 function populate_load!(model::AbstractModel, load::NodeMoment)
-    idx = load.node.globalID[4:6]
-    model.P[idx] += [to_newton_meters(v) for v in load.value]
+    gid = load.node.globalID
+    @inbounds for i in 1:3
+        model.P[gid[i+3]] += to_newton_meters(load.value[i])
+    end
 end
 
 """
@@ -239,8 +245,10 @@ end
 Populate the global load vector P with a nodal moment.
 """
 function populate_load!(P::Vector{Float64}, load::NodeMoment)
-    idx = load.node.globalID[4:6]
-    P[idx] += [to_newton_meters(v) for v in load.value]
+    gid = load.node.globalID
+    @inbounds for i in 1:3
+        P[gid[i+3]] += to_newton_meters(load.value[i])
+    end
 end
 
 """
@@ -403,7 +411,7 @@ function create_F(model::FrameModel, loads::Vector{T}) where {T<:AbstractLoad}
     Pf = zeros(model.nDOFs)
 
     for load in loads
-        if typeof(load) <: ElementLoad
+        if load isa ElementLoad
             populate_load!(Pf, load)
         else
             populate_load!(P, load)
@@ -423,7 +431,7 @@ function create_F(model::Model, loads::Vector{T}) where {T<:AbstractLoad}
     Pf = zeros(model.nDOFs)
 
     for load in loads
-        if typeof(load) <: ElementLoad
+        if load isa ElementLoad
             populate_load!(Pf, load)
         else
             populate_load!(P, load)
@@ -458,21 +466,20 @@ end
 Assemble the global stiffness matrix S for a frame model.
 """
 function create_S!(model::FrameModel)
-    I = Vector{Int64}()
-    J = Vector{Int64}()
-    V = Vector{Float64}()
+    nnz_tot = 144 * length(model.elements)  # 12×12 per frame element (exact)
+    I = Vector{Int64}(undef, nnz_tot)
+    J = Vector{Int64}(undef, nnz_tot)
+    V = Vector{Float64}(undef, nnz_tot)
 
+    pos = 0
     for element in model.elements
         idx = element.globalID
         n = length(idx)
-        
-        for i = 1:n
-            for j = 1:n
-                k = element.K[i,j]
-                push!(I, idx[i])
-                push!(J, idx[j])
-                push!(V, k)
-            end
+        @inbounds for i = 1:n, j = 1:n
+            pos += 1
+            I[pos] = idx[i]
+            J[pos] = idx[j]
+            V[pos] = element.K[i,j]
         end
     end
 
@@ -485,21 +492,20 @@ end
 Assemble the global stiffness matrix S for a shell model.
 """
 function create_S!(model::ShellModel)
-    I = Vector{Int64}()
-    J = Vector{Int64}()
-    V = Vector{Float64}()
+    nnz_tot = sum(length(e.globalID)^2 for e in model.elements; init=0)
+    I = Vector{Int64}(undef, nnz_tot)
+    J = Vector{Int64}(undef, nnz_tot)
+    V = Vector{Float64}(undef, nnz_tot)
 
+    pos = 0
     for element in model.elements
         idx = element.globalID
         n = length(idx)
-        
-        for i = 1:n
-            for j = 1:n
-                k = element.K[i,j]
-                push!(I, idx[i])
-                push!(J, idx[j])
-                push!(V, k)
-            end
+        @inbounds for i = 1:n, j = 1:n
+            pos += 1
+            I[pos] = idx[i]
+            J[pos] = idx[j]
+            V[pos] = element.K[i,j]
         end
     end
 
@@ -512,31 +518,32 @@ end
 Assemble the global stiffness matrix S for a unified model.
 """
 function create_S!(model::Model)
-    I = Vector{Int64}()
-    J = Vector{Int64}()
-    V = Vector{Float64}()
+    nnz_tot = 144 * length(model.frame_elements) +
+              sum(length(e.globalID)^2 for e in model.shell_elements; init=0)
+    I = Vector{Int64}(undef, nnz_tot)
+    J = Vector{Int64}(undef, nnz_tot)
+    V = Vector{Float64}(undef, nnz_tot)
 
-    # Add frame element contributions
+    pos = 0
     for element in model.frame_elements
         idx = element.globalID
         n = length(idx)
-        
-        for i = 1:n, j = 1:n
-            push!(I, idx[i])
-            push!(J, idx[j])
-            push!(V, element.K[i,j])
+        @inbounds for i = 1:n, j = 1:n
+            pos += 1
+            I[pos] = idx[i]
+            J[pos] = idx[j]
+            V[pos] = element.K[i,j]
         end
     end
-    
-    # Add shell element contributions
+
     for element in model.shell_elements
         idx = element.globalID
         n = length(idx)
-        
-        for i = 1:n, j = 1:n
-            push!(I, idx[i])
-            push!(J, idx[j])
-            push!(V, element.K[i,j])
+        @inbounds for i = 1:n, j = 1:n
+            pos += 1
+            I[pos] = idx[i]
+            J[pos] = idx[j]
+            V[pos] = element.K[i,j]
         end
     end
 
@@ -549,21 +556,20 @@ end
 Assemble the global stiffness matrix S for a truss model.
 """
 function create_S!(model::TrussModel)
-    I = Vector{Int64}()
-    J = Vector{Int64}()
-    V = Vector{Float64}()
+    nnz_tot = 36 * length(model.elements)  # 6×6 per truss element (exact)
+    I = Vector{Int64}(undef, nnz_tot)
+    J = Vector{Int64}(undef, nnz_tot)
+    V = Vector{Float64}(undef, nnz_tot)
 
+    pos = 0
     for element in model.elements
         idx = element.globalID
         n = length(idx)
-        
-        for i = 1:n
-            for j = 1:n
-                k = element.K[i,j]
-                push!(I, idx[i])
-                push!(J, idx[j])
-                push!(V, k)
-            end
+        @inbounds for i = 1:n, j = 1:n
+            pos += 1
+            I[pos] = idx[i]
+            J[pos] = idx[j]
+            V[pos] = element.K[i,j]
         end
     end
 
@@ -581,9 +587,10 @@ Assemble global stiffness matrix from a vector of elements.
 Works with any element type that has `globalID` and `K` fields.
 """
 function assemble_stiffness(elements::Vector, n_dof::Int)
-    I = Int[]
-    J = Int[]
-    V = Float64[]
+    nnz_est = sum(length(e.globalID)^2 for e in elements; init=0)
+    I = Int[]; sizehint!(I, nnz_est)
+    J = Int[]; sizehint!(J, nnz_est)
+    V = Float64[]; sizehint!(V, nnz_est)
     
     for elem in elements
         idx = elem.globalID

@@ -67,7 +67,7 @@ mutable struct Element{R<:Release} <: FrameElement{R}
     nodeEnd::Node                       # End node
     elementID::Int64                    # Element index
     globalID::Vector{Int64}             # Element global DOFs
-    length::QuantityDistance            # Length of element
+    length::Length            # Length of element
     K::Matrix{Float64}                  # Stiffness matrix in GCS
     Q::Vector{Float64}                  # Fixed end forces in GCS
     R::Matrix{Float64}                  # Transformation matrix
@@ -105,7 +105,7 @@ mutable struct Element{R<:Release} <: FrameElement{R}
             zeros(12),
             zeros(12, 12),
             pi/2,
-            repeat([zeros(3)], 3),
+            [zeros(3), zeros(3), zeros(3)],
             zeros(12),
             id,
             ecc
@@ -186,7 +186,7 @@ mutable struct TrussElement <: AbstractElement
     nodeEnd::TrussNode                      # End node
     elementID::Int64                        # Element index
     globalID::Vector{Int64}                 # Element global DOFs
-    length::QuantityDistance                # Length of element
+    length::Length                # Length of element
     K::Matrix{Float64}                      # Stiffness matrix in GCS
     R::Matrix{Float64}                      # Transformation matrix
     forces::Vector{Float64}                 # Elemental forces in LCS
@@ -194,7 +194,7 @@ mutable struct TrussElement <: AbstractElement
     LCS::Vector{Vector{Float64}}
     id::Union{Symbol, Nothing}              # Optional identifier
 
-    function TrussElement(nodeStart::TrussNode, nodeEnd::TrussNode, section::AbstractSection, id = :element)
+    function TrussElement(nodeStart::TrussNode, nodeEnd::TrussNode, section::AbstractCrossSection, id = :element)
         
         element = new(
             section,
@@ -207,7 +207,7 @@ mutable struct TrussElement <: AbstractElement
             zeros(2, 6),
             zeros(6),
             pi/2,
-            repeat([zeros(3)], 3),
+            [zeros(3), zeros(3), zeros(3)],
             id
         )
 

@@ -385,6 +385,6 @@ plot(curve.displacement, curve.load_factor)
 ```
 """
 function capacity_curve(result::NonlinearResult)
-    max_disps = [maximum(abs.(u)) for u in result.displacements]
+    max_disps = [mapreduce(abs, max, u) for u in result.displacements]
     return (displacement=max_disps, load_factor=result.load_factors)
 end

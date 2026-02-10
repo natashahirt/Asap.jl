@@ -38,88 +38,121 @@ end
 """
     displacements(element::Element; n::Integer = 20)
 
-Get the [3 × n] matrix where each column represents the local [x,y,z] displacement of the element from end forces
+Get the [3 × n] matrix where each column represents the local [x,y,z] displacement of the element from end forces.
+Optimized to avoid broadcast+vcat allocation pattern.
 """
 function unodal(element::Element; n::Integer = 20)
 
-    # Strip units from displacements for matrix multiplication (R and K are Float64)
-    # DOFs 1-3 are translations (m), DOFs 4-6 are rotations (rad)
-    ustart = to_displacement_vec(element.nodeStart.displacement)
-    uend = to_displacement_vec(element.nodeEnd.displacement)
-    
-    # base properties
-    ulocal = element.R * [ustart; uend] .* etype2DOF[typeof(element)]
+    # Fill uglobal directly (avoids 2 to_displacement_vec + concat allocs)
+    _ug = Vector{Float64}(undef, 12)
+    _fill_uglobal!(_ug, element)
+
+    # In-place R * uglobal (avoids matvec alloc)
+    _ul = Vector{Float64}(undef, 12)
+    mul!(_ul, element.R, _ug)
+
+    # Apply DOF mask in-place (avoids .* broadcast alloc)
+    dofs = etype2DOF[typeof(element)]
+    @inbounds for i in 1:12
+        _ul[i] *= dofs[i]
+    end
+
     L = ustrip(u"m", element.length)
 
-    # extracting relevant nodal DOFs
-    uX = ulocal[[1, 7]]
-    uY = ulocal[[2, 6, 8, 12]]
-    uZ = ulocal[[3, 5, 9, 11]] .* [1, -1, 1, -1]
+    uX1 = _ul[1];  uX2 = _ul[7]
+    uY1 = _ul[2];  uY2 = _ul[6];  uY3 = _ul[8];  uY4 = _ul[12]
+    uZ1 = _ul[3];  uZ2 = -_ul[5]; uZ3 = _ul[9];  uZ4 = -_ul[11]
 
-    # discretizing length of element
     xrange = range(0, L, n)
 
-    nA = vcat(Naxial.(xrange, L)...)
-    nT = vcat(N.(xrange, L)...)
+    # Build displacement vectors directly (avoids n+1 small matrix allocations)
+    dx = Vector{Float64}(undef, n)
+    dy = Vector{Float64}(undef, n)
+    dz = Vector{Float64}(undef, n)
 
-    dx = nA * uX
-    dy = nT * uY
-    dz = nT * uZ
+    @inbounds for i in 1:n
+        x = xrange[i]
+        xL = x / L
 
-    # [dx' ; dy' ; dz']
+        # Axial: linear interpolation
+        dx[i] = (1 - xL) * uX1 + xL * uX2
+
+        # Transverse (Hermite): N(x,L) * u
+        n1 = 1 - 3xL^2 + 2xL^3
+        n2 = x * (1 - xL)^2
+        n3 = 3xL^2 - 2xL^3
+        n4 = x^2/L * (-1 + xL)
+
+        dy[i] = n1*uY1 + n2*uY2 + n3*uY3 + n4*uY4
+        dz[i] = n1*uZ1 + n2*uZ2 + n3*uZ3 + n4*uZ4
+    end
+
     dx, dy, dz
 end
+
+# =============================================================================
+# accumulatedisp!  —  LineLoad
+# =============================================================================
 
 """
 Accumlate the internal forces cause by a line load to an element
 """
 function accumulatedisp!(
     load::LineLoad, 
-    xvals::Vector{Float64}, 
+    xvals::AbstractVector{Float64}, 
     Dy::Vector{Float64},
-    Dz::Vector{Float64})
+    Dz::Vector{Float64},
+    ep::ElementProps)
 
-    R = load.element.R[1:3, 1:3]
-    # Strip units from length and section properties (convert Quantity → Float64)
-    L = ustrip(u"m", uconvert(u"m", load.element.length))
-    E = ustrip(u"Pa", uconvert(u"Pa", load.element.section.E))
-    Istrong = ustrip(u"m^4", uconvert(u"m^4", load.element.section.Ix))
-    Iweak = ustrip(u"m^4", uconvert(u"m^4", load.element.section.Iy))
+    v1 = ustrip(u"N/m", load.value[1])
+    v2 = ustrip(u"N/m", load.value[2])
+    v3 = ustrip(u"N/m", load.value[3])
+    _, wy, wz = _rotate_to_local(ep.Rv, v1, v2, v3)
 
-    # distributed load magnitudes in LCS (strip units from load.value)
-    value_stripped = [ustrip(u"N/m", uconvert(u"N/m", v)) for v in load.value]
-    wx, wy, wz = (R * value_stripped) .* [1, -1, -1]
-
-    # Use dispatched DLine function based on element type
-    Dy .-= DLine.(Ref(load.element), wy, L, xvals, E, Istrong)
-    Dz .-= DLine.(Ref(load.element), wz, L, xvals, E, Iweak)
+    @inbounds for i in eachindex(xvals)
+        Dy[i] -= DLine(load.element, wy, ep.L, xvals[i], ep.E, ep.Ix)
+        Dz[i] -= DLine(load.element, wz, ep.L, xvals[i], ep.E, ep.Iy)
+    end
 end
+
+function accumulatedisp!(load::LineLoad, xvals::AbstractVector{Float64}, Dy::Vector{Float64}, Dz::Vector{Float64})
+    accumulatedisp!(load, xvals, Dy, Dz, ElementProps(load.element))
+end
+
+# =============================================================================
+# accumulatedisp!  —  PointLoad
+# =============================================================================
 
 """
 Accumlate the internal forces cause by a point load to an element
 """
 function accumulatedisp!(
     load::PointLoad, 
-    xvals::Vector{Float64}, 
+    xvals::AbstractVector{Float64}, 
     Dy::Vector{Float64},
-    Dz::Vector{Float64})
+    Dz::Vector{Float64},
+    ep::ElementProps)
 
-    R = load.element.R[1:3, 1:3]
-    # Strip units from length and section properties (convert Quantity → Float64)
-    L = ustrip(u"m", uconvert(u"m", load.element.length))
-    E = ustrip(u"Pa", uconvert(u"Pa", load.element.section.E))
-    Istrong = ustrip(u"m^4", uconvert(u"m^4", load.element.section.Ix))
-    Iweak = ustrip(u"m^4", uconvert(u"m^4", load.element.section.Iy))
     frac = load.position
 
-    # distributed load magnitudes in LCS (strip units from load.value)
-    value_stripped = [ustrip(u"N", uconvert(u"N", v)) for v in load.value]
-    px, py, pz = (R * value_stripped) .* [1, -1, -1]
+    v1 = ustrip(u"N", load.value[1])
+    v2 = ustrip(u"N", load.value[2])
+    v3 = ustrip(u"N", load.value[3])
+    _, py, pz = _rotate_to_local(ep.Rv, v1, v2, v3)
 
-    # Use dispatched DPoint function based on element type
-    Dy .-= DPoint.(Ref(load.element), py, L, xvals, frac, E, Istrong)
-    Dz .-= DPoint.(Ref(load.element), pz, L, xvals, frac, E, Iweak)
+    @inbounds for i in eachindex(xvals)
+        Dy[i] -= DPoint(load.element, py, ep.L, xvals[i], frac, ep.E, ep.Ix)
+        Dz[i] -= DPoint(load.element, pz, ep.L, xvals[i], frac, ep.E, ep.Iy)
+    end
 end
+
+function accumulatedisp!(load::PointLoad, xvals::AbstractVector{Float64}, Dy::Vector{Float64}, Dz::Vector{Float64})
+    accumulatedisp!(load, xvals, Dy, Dz, ElementProps(load.element))
+end
+
+# =============================================================================
+# accumulatedisp!  —  TributaryLoad
+# =============================================================================
 
 """
 Accumulate the displacement caused by a TributaryLoad to an element.
@@ -128,21 +161,17 @@ Each segment is approximated as a point load at its centroid.
 """
 function accumulatedisp!(
     load::TributaryLoad, 
-    xvals::Vector{Float64}, 
+    xvals::AbstractVector{Float64}, 
     Dy::Vector{Float64},
-    Dz::Vector{Float64})
+    Dz::Vector{Float64},
+    ep::ElementProps)
 
     element = load.element
-    R = element.R[1:3, 1:3]
-    L = ustrip(u"m", element.length)
-    E = ustrip(u"Pa", element.section.E)
-    Istrong = ustrip(u"m^4", element.section.Ix)
-    Iweak = ustrip(u"m^4", element.section.Iy)
+    L = ep.L
 
-    # Load parameters
-    dir = collect(load.direction)
-    pressure = ustrip(u"Pa", load.pressure)
-    widths_m = [ustrip(u"m", w) for w in load.widths]
+    d1, d2, d3 = load.direction
+    pressure = load._pressure_Pa
+    widths_m = load._widths_m
     positions = load.positions
     n_seg = length(positions) - 1
 
@@ -150,34 +179,34 @@ function accumulatedisp!(
         s1, s2 = positions[i], positions[i+1]
         w1, w2 = widths_m[i], widths_m[i+1]
 
-        # Skip negligible segments
         (s2 - s1) < 1e-12 && continue
         (w1 + w2) < 1e-12 && continue
 
-        # Segment parameters
         a = s1 * L
         b = s2 * L
         seg_len = b - a
         
-        # Average intensity and total force for this segment
-        w_avg = pressure * (w1 + w2) / 2  # N/m
-        F_total = w_avg * seg_len  # N
-        
-        # Centroid position as fraction of span
+        w_avg = pressure * (w1 + w2) / 2
+        F_total = w_avg * seg_len
         frac = (a + b) / 2 / L
 
-        # Global load vector
-        w_global = dir .* F_total
-        
-        # Transform to local coordinate system
-        w_local = R * w_global
-        px, py, pz = w_local .* [1, -1, -1]
+        g1, g2, g3 = d1 * F_total, d2 * F_total, d3 * F_total
+        _, py, pz = _rotate_to_local(ep.Rv, g1, g2, g3)
 
-        # Use point load displacement formula at centroid
-        Dy .-= DPoint.(Ref(element), py, L, xvals, frac, E, Istrong)
-        Dz .-= DPoint.(Ref(element), pz, L, xvals, frac, E, Iweak)
+        @inbounds for j in eachindex(xvals)
+            Dy[j] -= DPoint(element, py, L, xvals[j], frac, ep.E, ep.Ix)
+            Dz[j] -= DPoint(element, pz, L, xvals[j], frac, ep.E, ep.Iy)
+        end
     end
 end
+
+function accumulatedisp!(load::TributaryLoad, xvals::AbstractVector{Float64}, Dy::Vector{Float64}, Dz::Vector{Float64})
+    accumulatedisp!(load, xvals, Dy, Dz, ElementProps(load.element))
+end
+
+# =============================================================================
+# accumulatedisp!  —  GravityLoad
+# =============================================================================
 
 """
 Accumulate the displacement cause by a GravityLoad (self-weight) to an element.
@@ -185,34 +214,33 @@ GravityLoad applies a distributed load equal to ρ * A * g in the global -Z dire
 """
 function accumulatedisp!(
     load::GravityLoad, 
-    xvals::Vector{Float64}, 
+    xvals::AbstractVector{Float64}, 
     Dy::Vector{Float64},
-    Dz::Vector{Float64})
+    Dz::Vector{Float64},
+    ep::ElementProps)
 
     element = load.element
-    R = element.R[1:3, 1:3]
-    # Strip units from length and section properties
-    L = ustrip(u"m", element.length)
-    E = ustrip(u"Pa", element.section.E)
-    Istrong = ustrip(u"m^4", element.section.Ix)
-    Iweak = ustrip(u"m^4", element.section.Iy)
 
-    # Self-weight per unit length: w = ρ * A * g (in N/m)
     ρ = ustrip(u"kg/m^3", element.section.ρ)
     A = ustrip(u"m^2", element.section.A)
     g = ustrip(u"m/s^2", load.factor)
-    w_mag = ρ * A * g  # N/m
+    w_mag = ρ * A * g
 
-    # Global load vector: self-weight acts in -Z direction
-    w_global = [0.0, 0.0, -w_mag]
+    _, wy, wz = _rotate_to_local(ep.Rv, 0.0, 0.0, -w_mag)
 
-    # Transform to local coordinate system
-    wx, wy, wz = (R * w_global) .* [1, -1, -1]
-
-    # Use dispatched DLine function based on element type
-    Dy .-= DLine.(Ref(element), wy, L, xvals, E, Istrong)
-    Dz .-= DLine.(Ref(element), wz, L, xvals, E, Iweak)
+    @inbounds for i in eachindex(xvals)
+        Dy[i] -= DLine(element, wy, ep.L, xvals[i], ep.E, ep.Ix)
+        Dz[i] -= DLine(element, wz, ep.L, xvals[i], ep.E, ep.Iy)
+    end
 end
+
+function accumulatedisp!(load::GravityLoad, xvals::AbstractVector{Float64}, Dy::Vector{Float64}, Dz::Vector{Float64})
+    accumulatedisp!(load, xvals, Dy, Dz, ElementProps(load.element))
+end
+
+# =============================================================================
+# ElementDisplacements
+# =============================================================================
 
 """
     ulocal(element::Element, model; resolution = 20)
@@ -220,20 +248,20 @@ end
 Get the [3 × resolution] matrix of xyz displacements in LCS
 """
 function ulocal(element::Element, model::Union{FrameModel, Model}; resolution = 20)
-    # Strip units from length (convert Quantity → Float64)
-    L = ustrip(u"m", uconvert(u"m", element.length))
+    ep = ElementProps(element)
+    L = ep.L
 
-    xinc = collect(range(0, L, resolution))
+    rng = range(0, L, resolution)
 
-    D = unodal(element; n = resolution)
+    Dx, Dy, Dz = unodal(element; n = resolution)
 
     element_loads = get_elemental_loads(model)
 
     for load in element_loads[element.elementID]
-        accumulatedisp!(load, xinc, D[2,:], D[3,:])
+        accumulatedisp!(load, rng, Dy, Dz, ep)
     end
 
-    return D
+    return [Dx'; Dy'; Dz']
 end
 
 """
@@ -242,20 +270,29 @@ end
 Get the [3 × resolution] matrix of xyz displacements in GCS
 """
 function uglobal(element::Element, model::Union{FrameModel, Model}; resolution = 20)
-    # Strip units from length (convert Quantity → Float64)
-    L = ustrip(u"m", uconvert(u"m", element.length))
+    ep = ElementProps(element)
+    L = ep.L
 
-    xinc = collect(range(0, L, resolution))
+    rng = range(0, L, resolution)
 
-    D = unodal(element; n = resolution)
+    Dx, Dy, Dz = unodal(element; n = resolution)
 
     element_loads = get_elemental_loads(model)
 
     for load in element_loads[element.elementID]
-        accumulatedisp!(load, xinc, D[2,:], D[3,:])
+        accumulatedisp!(load, rng, Dy, Dz, ep)
     end
 
-    return hcat([sum(Δ .* element.LCS) for Δ in eachcol(D)]...)
+    # Rotate local displacements to global using LCS vectors (avoids hcat + comprehension)
+    lx, ly, lz = element.LCS[1], element.LCS[2], element.LCS[3]
+    Dglobal = Matrix{Float64}(undef, 3, resolution)
+    @inbounds for j in 1:resolution
+        dx, dy, dz = Dx[j], Dy[j], Dz[j]
+        Dglobal[1,j] = dx*lx[1] + dy*ly[1] + dz*lz[1]
+        Dglobal[2,j] = dx*lx[2] + dy*ly[2] + dz*lz[2]
+        Dglobal[3,j] = dx*lx[3] + dy*ly[3] + dz*lz[3]
+    end
+    return Dglobal
 end
 
 struct ElementDisplacements
@@ -273,72 +310,122 @@ end
 Get the local/global displacements of an element
 """
 function ElementDisplacements(element::AbstractElement, model::Union{FrameModel, Model}; resolution = 20)
-    # Strip units from length (convert Quantity → Float64)
-    L = ustrip(u"m", uconvert(u"m", element.length))
+    element_loads = get_elemental_loads(model)
+    return ElementDisplacements(element, element_loads[element.elementID]; resolution=resolution)
+end
 
-    xinc = collect(range(0, L, resolution))
+"""
+    ElementDisplacements(element, loads; resolution=20)
+
+Get displacements from pre-computed element loads (avoids rebuilding the loads map).
+"""
+function ElementDisplacements(element::AbstractElement, loads_for_elem::AbstractVector{<:AbstractLoad}; resolution = 20)
+    ep = ElementProps(element)
+    L = ep.L
+
+    rng = range(0, L, resolution)
 
     Dx, Dy, Dz = unodal(element; n = resolution)
 
-    element_loads = get_elemental_loads(model)
-
-    for load in element_loads[element.elementID]
-        accumulatedisp!(load, xinc, Dy, Dz)
+    for load in loads_for_elem
+        accumulatedisp!(load, rng, Dy, Dz, ep)
     end
 
-    D = [Dx'; Dy'; Dz']
+    # Build local displacement matrix directly from vectors (avoids [Dx'; Dy'; Dz'] allocation)
+    D = Matrix{Float64}(undef, 3, resolution)
+    @inbounds for j in 1:resolution
+        D[1,j] = Dx[j]; D[2,j] = Dy[j]; D[3,j] = Dz[j]
+    end
 
-    Dglobal = hcat([sum(Δ .* element.LCS) for Δ in eachcol(D)]...)
+    # Rotate local displacements to global using LCS vectors
+    lx, ly, lz = element.LCS[1], element.LCS[2], element.LCS[3]
+    Dglobal = Matrix{Float64}(undef, 3, resolution)
+    @inbounds for j in 1:resolution
+        dx, dy, dz = Dx[j], Dy[j], Dz[j]
+        Dglobal[1,j] = dx*lx[1] + dy*ly[1] + dz*lz[1]
+        Dglobal[2,j] = dx*lx[2] + dy*ly[2] + dz*lz[2]
+        Dglobal[3,j] = dx*lx[3] + dy*ly[3] + dz*lz[3]
+    end
 
-    # Strip units from position (convert Quantity → Float64) for basepoints calculation
-    pos_start = [ustrip(u"m", uconvert(u"m", p)) for p in element.nodeStart.position]
-    basepoints = pos_start .+ first(element.LCS) * xinc'
+    # Base positions along element axis
+    px = ustrip(u"m", element.nodeStart.position[1])
+    py = ustrip(u"m", element.nodeStart.position[2])
+    pz = ustrip(u"m", element.nodeStart.position[3])
+    ax_x, ax_y, ax_z = element.LCS[1][1], element.LCS[1][2], element.LCS[1][3]
+    xinc = collect(rng)
+    basepoints = Matrix{Float64}(undef, 3, resolution)
+    @inbounds for j in 1:resolution
+        basepoints[1,j] = px + ax_x * rng[j]
+        basepoints[2,j] = py + ax_y * rng[j]
+        basepoints[3,j] = pz + ax_z * rng[j]
+    end
 
     return ElementDisplacements(element, resolution, xinc, D, Dglobal, basepoints)
 end
 
 function ElementDisplacements(elements::AbstractVector{<:AbstractElement}, model::Union{FrameModel, Model}; resolution = 20)
 
-    xstore = Vector{Float64}()
-    ulocalstore = Vector{Matrix{Float64}}()
-    uglobalstore = Vector{Matrix{Float64}}()
-    basepointstore = Vector{Matrix{Float64}}()
+    n_elem = length(elements)
+    per_elem_res = max(Int(round(resolution / n_elem)), 2)
+    total_pts = per_elem_res * n_elem
 
-    resolution = Int(round(resolution / length(elements)))
+    xstore     = Vector{Float64}(undef, total_pts)
+    ulocal_all = Matrix{Float64}(undef, 3, total_pts)
+    uglobal_all = Matrix{Float64}(undef, 3, total_pts)
+    basepoint_all = Matrix{Float64}(undef, 3, total_pts)
 
     element_loads = get_elemental_loads(model)
+    k = 0
 
     for element in elements
-        # Strip units from length (convert Quantity → Float64)
-        L = ustrip(u"m", uconvert(u"m", element.length))
+        ep = ElementProps(element)
+        L = ep.L
 
-        xinc = collect(range(0, L, resolution))
+        rng = range(0, L, per_elem_res)
 
-        Dx, Dy, Dz = unodal(element; n = resolution)
+        Dx, Dy, Dz = unodal(element; n = per_elem_res)
 
         for load in element_loads[element.elementID]
-            accumulatedisp!(load, xinc, Dy, Dz)
+            accumulatedisp!(load, rng, Dy, Dz, ep)
         end
 
-        D = [Dx'; Dy'; Dz']
-        Dglobal = hcat([sum(Δ .* element.LCS) for Δ in eachcol(D)]...)
+        # Rotate local → global using LCS vectors
+        lx, ly, lz = element.LCS[1], element.LCS[2], element.LCS[3]
+        
+        # Base position for this element
+        px = ustrip(u"m", element.nodeStart.position[1])
+        py = ustrip(u"m", element.nodeStart.position[2])
+        pz = ustrip(u"m", element.nodeStart.position[3])
+        ax_x, ax_y, ax_z = lx[1], lx[2], lx[3]  # local X axis = element axis
 
-        # Strip units from position (convert Quantity → Float64) for basepoints calculation
-        pos_start = [ustrip(u"m", uconvert(u"m", p)) for p in element.nodeStart.position]
-        basepoints = pos_start .+ first(element.LCS) * xinc'
-
-        if isempty(xstore)
-            xstore = [xstore; xinc]
-        else
-            xstore = [xstore; xstore[end] .+ xinc]
+        x_offset = k > 0 ? xstore[k] : 0.0
+        @inbounds for j in 1:per_elem_res
+            k += 1
+            xstore[k] = x_offset + rng[j]
+            
+            # Local displacements
+            dx, dy, dz = Dx[j], Dy[j], Dz[j]
+            ulocal_all[1,k] = dx
+            ulocal_all[2,k] = dy
+            ulocal_all[3,k] = dz
+            
+            # Global displacements (rotate LCS → GCS)
+            uglobal_all[1,k] = dx*lx[1] + dy*ly[1] + dz*lz[1]
+            uglobal_all[2,k] = dx*lx[2] + dy*ly[2] + dz*lz[2]
+            uglobal_all[3,k] = dx*lx[3] + dy*ly[3] + dz*lz[3]
+            
+            # Base positions along element axis
+            basepoint_all[1,k] = px + ax_x * xinc[j]
+            basepoint_all[2,k] = py + ax_y * xinc[j]
+            basepoint_all[3,k] = pz + ax_z * xinc[j]
         end
-
-        push!(ulocalstore, D)
-        push!(uglobalstore, Dglobal)
-        push!(basepointstore, basepoints)
     end
 
-    return ElementDisplacements(elements[1], resolution, xstore, hcat(ulocalstore...), hcat(uglobalstore...), hcat(basepointstore...))
+    resize!(xstore, k)
+    ulocal_out = ulocal_all[:, 1:k]
+    uglobal_out = uglobal_all[:, 1:k]
+    basepoint_out = basepoint_all[:, 1:k]
+    return ElementDisplacements(elements[1], resolution, xstore, ulocal_out, uglobal_out, basepoint_out)
 end
 
 """
@@ -351,7 +438,6 @@ Get the displacements of all elements in a model.
 - `increment` - Distance between sampling points (accepts Unitful length or Real in meters)
 """
 function displacements(model::FrameModel, increment)
-    # Accept Unitful or Real - strip to meters internally
     inc_m = increment isa Unitful.Quantity ? ustrip(u"m", increment) : Float64(increment)
 
     results = Vector{ElementDisplacements}()
@@ -366,7 +452,6 @@ function displacements(model::FrameModel, increment)
 end
 
 function displacements(model::Model, increment)
-    # Accept Unitful or Real - strip to meters internally
     inc_m = increment isa Unitful.Quantity ? ustrip(u"m", increment) : Float64(increment)
     
     if isempty(model.frame_elements)

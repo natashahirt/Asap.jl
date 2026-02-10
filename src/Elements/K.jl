@@ -30,6 +30,31 @@ Mathematical formulations based on:
 using LinearAlgebra: mul!, Transpose, I
 
 # =============================================================================
+# Thread-Local Workspace Buffers
+# =============================================================================
+
+struct _KWorkspace
+    aN::Matrix{Float64}       # 6×12
+    DN::Matrix{Float64}       # 6×6
+    K_local::Matrix{Float64}  # 12×12
+    temp6x12::Matrix{Float64} # 6×12  (for mul! in natural stiffness)
+    temp12x12::Matrix{Float64}# 12×12 (for mul! in global_K!)
+    Te::Matrix{Float64}       # 12×12 (for eccentricity transformation)
+end
+
+_KWorkspace() = _KWorkspace(
+    zeros(6, 12), zeros(6, 6), zeros(12, 12),
+    zeros(6, 12), zeros(12, 12), zeros(12, 12)
+)
+
+const _K_WS_POOL = [_KWorkspace() for _ in 1:max(1, Threads.nthreads())]
+
+@inline function _get_k_ws()
+    tid = Threads.threadid()
+    @inbounds return _K_WS_POOL[tid]
+end
+
+# =============================================================================
 # Natural Deformation Formulation
 # =============================================================================
 
@@ -119,7 +144,6 @@ function natural_stiffness_timoshenko!(DN::Matrix{Float64}, E, G, A, I2, I3, J, 
     DN[6, 6] = G * J / L        # Torsion
     
     # Shear-corrected anti-symmetric bending
-    # Phi = 12*E*I / (G*A_shear*L²) is the shear correction factor
     Phi3 = 12 * E * I3 / (G * Ay * L^2)
     Phi2 = 12 * E * I2 / (G * Az * L^2)
     
@@ -144,18 +168,30 @@ function natural_stiffness!(DN::Matrix{Float64}, E, G, A, I2, I3, J, Ay, Az, L)
 end
 
 """
-    local_stiffness_natural!(K, E, G, A, I2, I3, J, Ay, Az, L, aN, DN)
+    local_stiffness_natural!(K, E, G, A, I2, I3, J, Ay, Az, L, aN, DN, temp6x12)
 
 Compute local stiffness matrix using natural deformation formulation.
-
-K = aN' * DN * aN
+Uses mul! to avoid intermediate allocations:
+  K = aN' * DN * aN  →  temp = DN * aN;  K = aN' * temp
 
 # Arguments
 - `K`: Output 12×12 stiffness matrix
 - Other parameters: Material and geometric properties
 - `aN`: Pre-allocated 6×12 transformation matrix
 - `DN`: Pre-allocated 6×6 natural stiffness matrix
+- `temp6x12`: Pre-allocated 6×12 workspace
 """
+function local_stiffness_natural!(K::Matrix{Float64}, E, G, A, I2, I3, J, Ay, Az, L,
+                                  aN::Matrix{Float64}, DN::Matrix{Float64},
+                                  temp6x12::Matrix{Float64})
+    local_cartesian_to_natural!(aN, L)
+    natural_stiffness!(DN, E, G, A, I2, I3, J, Ay, Az, L)
+    mul!(temp6x12, DN, aN)          # 6×12 = 6×6 × 6×12
+    mul!(K, transpose(aN), temp6x12) # 12×12 = 12×6 × 6×12
+    return K
+end
+
+# Legacy overload (allocates temp — kept for API compat)
 function local_stiffness_natural!(K::Matrix{Float64}, E, G, A, I2, I3, J, Ay, Az, L,
                                   aN::Matrix{Float64}, DN::Matrix{Float64})
     local_cartesian_to_natural!(aN, L)
@@ -190,21 +226,22 @@ function eccentricity_transformation!(Te::Matrix{Float64}, e_f1_1, e_f1_2, e_f2,
     Te .= 0.0
     
     # Identity blocks for direct DOF connections
-    Te[1:3, 1:3] .= I(3)
-    Te[4:6, 4:6] .= I(3)
-    Te[7:9, 7:9] .= I(3)
-    Te[10:12, 10:12] .= I(3)
-    
-    # Coupling terms from rotation to translation (rigid body kinematics)
-    # At start node (rows 1-3 from cols 4-6)
-    Te[1, 4:6] .= (0.0, e_f3, -e_f2)
-    Te[2, 4:6] .= (-e_f3, 0.0, e_f1_1)
-    Te[3, 4:6] .= (e_f2, -e_f1_1, 0.0)
-    
-    # At end node (rows 7-9 from cols 10-12)
-    Te[7, 10:12] .= (0.0, e_f3, -e_f2)
-    Te[8, 10:12] .= (-e_f3, 0.0, e_f1_2)
-    Te[9, 10:12] .= (e_f2, -e_f1_2, 0.0)
+    @inbounds begin
+        Te[1,1] = 1.0; Te[2,2] = 1.0; Te[3,3] = 1.0
+        Te[4,4] = 1.0; Te[5,5] = 1.0; Te[6,6] = 1.0
+        Te[7,7] = 1.0; Te[8,8] = 1.0; Te[9,9] = 1.0
+        Te[10,10] = 1.0; Te[11,11] = 1.0; Te[12,12] = 1.0
+        
+        # Coupling at start node (rows 1-3 from cols 4-6)
+        Te[1, 4] = 0.0;    Te[1, 5] = e_f3;    Te[1, 6] = -e_f2
+        Te[2, 4] = -e_f3;  Te[2, 5] = 0.0;     Te[2, 6] = e_f1_1
+        Te[3, 4] = e_f2;   Te[3, 5] = -e_f1_1; Te[3, 6] = 0.0
+        
+        # Coupling at end node (rows 7-9 from cols 10-12)
+        Te[7, 10] = 0.0;    Te[7, 11] = e_f3;    Te[7, 12] = -e_f2
+        Te[8, 10] = -e_f3;  Te[8, 11] = 0.0;     Te[8, 12] = e_f1_2
+        Te[9, 10] = e_f2;   Te[9, 11] = -e_f1_2; Te[9, 12] = 0.0
+    end
     
     return Te
 end
@@ -220,12 +257,9 @@ end
 Uses Timoshenko formulation when Ay, Az are finite.
 """
 function k_fixedfixed(E, A, L, G, Ix, Iy, J; Ay=Inf, Az=Inf)
-    # Use natural formulation
-    aN = zeros(6, 12)
-    DN = zeros(6, 6)
-    K = zeros(12, 12)
-    local_stiffness_natural!(K, E, G, A, Iy, Ix, J, Ay, Az, L, aN, DN)
-    return K
+    ws = _get_k_ws()
+    local_stiffness_natural!(ws.K_local, E, G, A, Iy, Ix, J, Ay, Az, L, ws.aN, ws.DN, ws.temp6x12)
+    return copy(ws.K_local)
 end
 
 """
@@ -325,8 +359,8 @@ local_K(element::Element{FixedFixed}) = k_fixedfixed(
     to_meters_fourth(element.section.Ix),
     to_meters_fourth(element.section.Iy),
     to_meters_fourth(element.section.J);
-    Ay = element.section.Ay,
-    Az = element.section.Az
+    Ay = to_meters_squared(element.section.Ay),
+    Az = to_meters_squared(element.section.Az)
 )
 
 local_K(element::Element{FixedFree}) = k_fixedfree(
@@ -366,24 +400,66 @@ local_K(element::TrussElement) = to_pascals(element.section.E) * to_meters_squar
 # =============================================================================
 
 """
-    global_K!(element::Element)
+    global_K!(element::Element{FixedFixed})
 
-Populate the element stiffness matrix `element.K` in global coordinate system.
-Applies eccentricity transformation if element has eccentric connections.
+Fully allocation-free stiffness computation for the most common release type.
+Computes local K via natural deformation, applies eccentricity if needed,
+then transforms to global coordinates using mul! with thread-local workspace.
 """
-function global_K!(element::Element)
-    K_local = local_K(element)
+function global_K!(element::Element{FixedFixed})
+    ws = _get_k_ws()
     
-    # Apply eccentricity transformation if needed
+    E  = to_pascals(element.section.E)
+    A  = to_meters_squared(element.section.A)
+    L  = to_meters(element.length)
+    G  = to_pascals(element.section.G)
+    Ix = to_meters_fourth(element.section.Ix)
+    Iy = to_meters_fourth(element.section.Iy)
+    J  = to_meters_fourth(element.section.J)
+    
+    local_stiffness_natural!(ws.K_local, E, G, A, Iy, Ix, J,
+                             to_meters_squared(element.section.Ay), to_meters_squared(element.section.Az), L,
+                             ws.aN, ws.DN, ws.temp6x12)
+    
     if has_eccentricity(element)
-        Te = zeros(12, 12)
-        eccentricity_transformation!(Te, element.eccentricity...)
-        K_temp = K_local * Te
-        K_local = Te' * K_temp
+        eccentricity_transformation!(ws.Te, element.eccentricity...)
+        mul!(ws.temp12x12, ws.K_local, ws.Te)
+        mul!(ws.K_local, transpose(ws.Te), ws.temp12x12)
     end
     
-    # Transform to global coordinates
-    element.K = element.R' * K_local * element.R
+    mul!(ws.temp12x12, ws.K_local, element.R)
+    mul!(element.K, transpose(element.R), ws.temp12x12)
+end
+
+"""
+    global_K!(element::Element)
+
+Generic global stiffness for non-FixedFixed release types.
+Uses mul! for the R' * K_local * R transformation to reduce allocations.
+"""
+function global_K!(element::Element)
+    ws = _get_k_ws()
+    K_local = local_K(element)
+    
+    if has_eccentricity(element)
+        eccentricity_transformation!(ws.Te, element.eccentricity...)
+        mul!(ws.temp12x12, K_local, ws.Te)
+        copyto!(ws.K_local, ws.temp12x12)
+        # K_local is now ws.temp12x12, but we need Te' * that
+        # Use K_local as scratch
+        mul!(ws.temp12x12, transpose(ws.Te), ws.K_local)
+        K_local = ws.temp12x12
+    end
+    
+    # Avoid using ws.temp12x12 if K_local IS ws.temp12x12
+    # Safe path: copy into ws.K_local first
+    if K_local === ws.temp12x12
+        copyto!(ws.K_local, K_local)
+        mul!(ws.temp12x12, ws.K_local, element.R)
+    else
+        mul!(ws.temp12x12, K_local, element.R)
+    end
+    mul!(element.K, transpose(element.R), ws.temp12x12)
 end
 
 function global_K!(element::TrussElement)

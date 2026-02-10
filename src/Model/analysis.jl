@@ -69,7 +69,7 @@ the global stiffness matrix, S.
 function process!(model::FrameModel)
     make_ids!(model)
 
-    if any(typeof.(model.elements) .<: BridgeElement)
+    if any(e -> e isa BridgeElement, model.elements)
         processBridge!(model)
         make_ids!(model)
     else
@@ -80,6 +80,8 @@ function process!(model::FrameModel)
     populate_loads!(model)
     create_S!(model)
 
+    model._factorization = nothing
+    model._elemental_loads = nothing
     model.processed = true
 end
 
@@ -97,6 +99,7 @@ function process!(model::ShellModel)
     populate_loads!(model)
     create_S!(model)
 
+    model._factorization = nothing
     model.processed = true
 end
 
@@ -116,6 +119,8 @@ function process!(model::Model)
     populate_loads!(model)
     create_S!(model)
 
+    model._factorization = nothing
+    model._elemental_loads = nothing
     model.processed = true
 end
 
@@ -131,6 +136,7 @@ function process!(model::TrussModel)
     populate_loads!(model)
     create_S!(model)
 
+    model._factorization = nothing
     model.processed = true
 end
 
@@ -144,25 +150,27 @@ end
 Solve for the nodal displacements of a structural model. 
 `reprocess = true` reevaluates all node/element properties and reassembles the global stiffness matrix.
 """
-function solve!(model::FrameModel; reprocess = false)
+function solve!(model::FrameModel; reprocess = false, postprocess::Symbol = :all)
     if !model.processed || reprocess
         for element in model.elements
-            if typeof(element) <: Element
+            if element isa Element
                 element.Q = zero(element.Q)
             end
         end
         process!(model)
+        model._factorization = nothing
     end
 
     idx = model.freeDOFs
     F = model.P[idx] - model.Pf[idx]
-    U = model.S[idx, idx] \ F
+    fact = _get_factorization(model)
+    U = fact \ F
 
     model.compliance = U' * F
-    model.u = zeros(model.nDOFs)
+    if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
-    post_process!(model)
+    post_process!(model; targets=postprocess)
 end
 
 """
@@ -170,19 +178,21 @@ end
 
 Solve for the nodal displacements of a shell model.
 """
-function solve!(model::ShellModel; reprocess = false)
+function solve!(model::ShellModel; reprocess = false, postprocess::Symbol = :all)
     if !model.processed || reprocess
         process!(model)
+        model._factorization = nothing
     end
 
     idx = model.freeDOFs
-    U = model.S[idx, idx] \ model.P[idx]
+    fact = _get_factorization(model)
+    U = fact \ model.P[idx]
 
     model.compliance = U' * model.P[idx]
-    model.u = zeros(model.nDOFs)
+    if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
-    post_process!(model)
+    post_process!(model; targets=postprocess)
 end
 
 """
@@ -191,26 +201,27 @@ end
 Solve for the nodal displacements of a unified model.
 Works with mixed frame+shell models or single-type models.
 """
-function solve!(model::Model; reprocess = false)
+function solve!(model::Model; reprocess = false, postprocess::Symbol = :all)
     if !model.processed || reprocess
-        # Clear fixed-end forces for frame elements
         for element in model.frame_elements
-            if typeof(element) <: Element
+            if element isa Element
                 element.Q = zero(element.Q)
             end
         end
         process!(model)
+        model._factorization = nothing
     end
 
     idx = model.freeDOFs
     F = model.P[idx] - model.Pf[idx]
-    U = model.S[idx, idx] \ F
+    fact = _get_factorization(model)
+    U = fact \ F
 
     model.compliance = U' * F
-    model.u = zeros(model.nDOFs)
+    if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
-    post_process!(model)
+    post_process!(model; targets=postprocess)
 end
 
 """
@@ -218,19 +229,21 @@ end
 
 Solve for the nodal displacements of a structural truss model.
 """
-function solve!(model::TrussModel; reprocess = false)
+function solve!(model::TrussModel; reprocess = false, postprocess::Symbol = :all)
     if !model.processed || reprocess
         process!(model)
+        model._factorization = nothing
     end
 
     idx = model.freeDOFs
-    U = model.S[idx, idx] \ model.P[idx]
+    fact = _get_factorization(model)
+    U = fact \ model.P[idx]
 
     model.compliance = U' * model.P[idx]
-    model.u = zeros(model.nDOFs)
+    if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
-    post_process!(model)
+    post_process!(model; targets=postprocess)
 end
 
 # =============================================================================
@@ -280,6 +293,7 @@ Replace the assigned model loads with a new load vector and solve.
 """
 function solve!(model::FrameModel, L::Vector{<:AbstractLoad})
     model.loads = L
+    model._elemental_loads = nothing
     process!(model)
     solve!(model)
     post_process!(model)
@@ -292,6 +306,7 @@ Replace the assigned model loads with a new load vector and solve.
 """
 function solve!(model::Model, L::Vector{<:AbstractLoad})
     model.loads = L
+    model._elemental_loads = nothing
     process!(model)
     solve!(model)
     post_process!(model)
@@ -452,77 +467,113 @@ end
 # Internal Analysis Implementations
 # =============================================================================
 
+# Helper: get or compute factorization for free DOFs.
+# Cholesky (CHOLMOD) is fastest for symmetric positive-definite stiffness
+# matrices — the common case.  Falls back to LDLᵀ (CHOLMOD) for symmetric
+# indefinite, then to LU (UMFPACK) as a last resort.
+# Uses check=false to avoid expensive exception/stack-trace overhead.
+#
+# Note: diagonal perturbation (K + ε·diag) was tried but actually degrades
+# solution quality on ill-conditioned systems.  LDLᵀ handles genuine
+# near-singularity better than a perturbed Cholesky.
+function _get_factorization(model::AbstractModel)
+    if model._factorization !== nothing
+        return model._factorization
+    end
+    idx = model.freeDOFs
+    K = Symmetric(model.S[idx, idx])
+    fact = cholesky(K; check=false)
+    if !issuccess(fact)
+        @warn "Stiffness matrix not SPD — trying LDLᵀ"
+        fact = ldlt(K; check=false)
+        if !issuccess(fact)
+            @warn "LDLᵀ failed — falling back to LU"
+            fact = lu(model.S[idx, idx])
+        end
+    end
+    model._factorization = fact
+    return fact
+end
+
 # Static - wrapper for existing solve!
-function _solve_static!(model::FrameModel; reprocess=false)
+function _solve_static!(model::FrameModel; reprocess=false, postprocess::Symbol=:all)
     if !model.processed || reprocess
         for element in model.elements
-            if typeof(element) <: Element
+            if element isa Element
                 element.Q = zero(element.Q)
             end
         end
         process!(model)
+        model._factorization = nothing
     end
 
     idx = model.freeDOFs
     F = model.P[idx] - model.Pf[idx]
-    U = model.S[idx, idx] \ F
+    fact = _get_factorization(model)
+    U = fact \ F
 
     model.compliance = U' * F
-    model.u = zeros(model.nDOFs)
+    if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
-    post_process!(model)
+    post_process!(model; targets=postprocess)
 end
 
-function _solve_static!(model::ShellModel; reprocess=false)
+function _solve_static!(model::ShellModel; reprocess=false, postprocess::Symbol=:all)
     if !model.processed || reprocess
         process!(model)
+        model._factorization = nothing
     end
 
     idx = model.freeDOFs
-    U = model.S[idx, idx] \ model.P[idx]
+    fact = _get_factorization(model)
+    U = fact \ model.P[idx]
 
     model.compliance = U' * model.P[idx]
-    model.u = zeros(model.nDOFs)
+    if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
-    post_process!(model)
+    post_process!(model; targets=postprocess)
 end
 
-function _solve_static!(model::Model; reprocess=false)
+function _solve_static!(model::Model; reprocess=false, postprocess::Symbol=:all)
     if !model.processed || reprocess
         for element in model.frame_elements
-            if typeof(element) <: Element
+            if element isa Element
                 element.Q = zero(element.Q)
             end
         end
         process!(model)
+        model._factorization = nothing
     end
 
     idx = model.freeDOFs
     F = model.P[idx] - model.Pf[idx]
-    U = model.S[idx, idx] \ F
+    fact = _get_factorization(model)
+    U = fact \ F
 
     model.compliance = U' * F
-    model.u = zeros(model.nDOFs)
+    if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
-    post_process!(model)
+    post_process!(model; targets=postprocess)
 end
 
-function _solve_static!(model::TrussModel; reprocess=false)
+function _solve_static!(model::TrussModel; reprocess=false, postprocess::Symbol=:all)
     if !model.processed || reprocess
         process!(model)
+        model._factorization = nothing
     end
 
     idx = model.freeDOFs
-    U = model.S[idx, idx] \ model.P[idx]
+    fact = _get_factorization(model)
+    U = fact \ model.P[idx]
 
     model.compliance = U' * model.P[idx]
-    model.u = zeros(model.nDOFs)
+    if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
-    post_process!(model)
+    post_process!(model; targets=postprocess)
 end
 
 # Modal - delegates to modal!
@@ -543,4 +594,46 @@ end
 # Nonlinear - delegates to solve_nonlinear!
 function _solve_nonlinear!(model; n_steps::Int=10, max_iter::Int=20, tol::Float64=1e-4, verbose::Bool=false)
     return solve_nonlinear!(model; n_steps=n_steps, max_iter=max_iter, tol=tol, verbose=verbose)
+end
+
+# =============================================================================
+# Light Reprocessing (topology unchanged, only sections/loads changed)
+# =============================================================================
+
+"""
+    _reprocess_stiffness_and_loads!(model)
+
+Lightweight reprocessing when only section properties and loads have changed
+but the model topology (nodes, elements, connectivity) is unchanged.
+
+Skips `make_ids!` and `populate_DOF_indices!` (which are topology-dependent),
+only re-computing element stiffnesses, load vectors, and the global stiffness
+matrix.  Used by the EFM cached path to avoid redundant work.
+"""
+function _reprocess_stiffness_and_loads!(model::FrameModel)
+    for element in model.elements
+        if element isa Element
+            fill!(element.Q, 0.0)
+        end
+    end
+    process_elements!(model)
+    populate_loads!(model)
+    create_S!(model)
+    model._factorization = nothing
+    model._elemental_loads = nothing
+    model.processed = true
+end
+
+function _reprocess_stiffness_and_loads!(model::Model)
+    for element in model.frame_elements
+        if element isa Element
+            fill!(element.Q, 0.0)
+        end
+    end
+    process_elements!(model)
+    populate_loads!(model)
+    create_S!(model)
+    model._factorization = nothing
+    model._elemental_loads = nothing
+    model.processed = true
 end

@@ -4,10 +4,309 @@ Shell Creation Utilities
 
 Convenient functions to create shell elements from corner nodes or external meshes.
 Uses DelaunayTriangulation.jl for automatic polygon triangulation.
+Includes structured mesh generation (T3block) adapted from FinEtools.jl (Petr Krysl, MIT License).
 =#
 
 import DelaunayTriangulation as DT
+import Meshes
 import Meshes: SimpleMesh, Point, coords
+
+# ============================================================================
+# Structured Mesh Generation (adapted from FinEtools.jl MeshTriangleModule)
+# ============================================================================
+
+"""
+    _t3block(Lx, Ly, nx, ny) -> (points, connectivity)
+
+Generate a structured triangular mesh of a rectangle [0,Lx] × [0,Ly].
+
+Returns `(points, conn)` where:
+- `points::Vector{Tuple{Float64,Float64}}` — node coordinates
+- `conn::Vector{NTuple{3,Int}}` — triangle connectivity (1-indexed)
+
+Each rectangular cell is split into 2 triangles (lower-left diagonal).
+Produces `(nx+1)*(ny+1)` nodes and `2*nx*ny` triangles.
+
+Adapted from FinEtools.jl `T3block` by Petr Krysl (MIT License).
+"""
+function _t3block(Lx::Float64, Ly::Float64, nx::Int, ny::Int)
+    xs = range(0.0, Lx, length=nx+1)
+    ys = range(0.0, Ly, length=ny+1)
+    return _t3blockx(collect(xs), collect(ys))
+end
+
+"""
+    _t3blockx(xs, ys) -> (points, connectivity)
+
+Generate a structured triangular mesh from explicit coordinate arrays.
+Supports non-uniform (graded) spacing.
+
+**Alternating diagonals** (checkerboard pattern): each quad cell `(i,j)` is
+split along the `/` diagonal when `(i+j)` is even and along the `\\` diagonal
+when `(i+j)` is odd. This eliminates the directional stiffness bias that a
+uniform diagonal orientation would introduce in FE analysis.
+
+Returns `(points, conn)` where:
+- `points::Vector{Tuple{Float64,Float64}}` — node coordinates
+- `conn::Vector{NTuple{3,Int}}` — triangle connectivity (1-indexed)
+
+Adapted from FinEtools.jl `T3blockx` by Petr Krysl (MIT License), with
+alternating-diagonal enhancement for structural analysis.
+"""
+function _t3blockx(xs::Vector{Float64}, ys::Vector{Float64})
+    nL = length(xs) - 1
+    nW = length(ys) - 1
+    nnodes = (nL + 1) * (nW + 1)
+    ncells = 2 * nL * nW
+
+    points = Vector{Tuple{Float64, Float64}}(undef, nnodes)
+    conn = Vector{NTuple{3, Int}}(undef, ncells)
+
+    # Generate node coordinates
+    f = 1
+    for j in 1:(nW+1)
+        for i in 1:(nL+1)
+            points[f] = (xs[i], ys[j])
+            f += 1
+        end
+    end
+
+    # Generate triangle connectivity with alternating diagonals
+    # Node numbering for cell (i, j):
+    #   nw = f+(nL+1)   ne = f+(nL+1)+1
+    #   sw = f           se = f+1
+    gc = 1
+    for i in 1:nL
+        for j in 1:nW
+            sw = (j - 1) * (nL + 1) + i
+            se = sw + 1
+            nw = sw + (nL + 1)
+            ne = nw + 1
+            
+            if iseven(i + j)
+                # "/" diagonal: sw → ne
+                conn[gc]     = (sw, se, ne)
+                conn[gc + 1] = (sw, ne, nw)
+            else
+                # "\" diagonal: se → nw
+                conn[gc]     = (sw, se, nw)
+                conn[gc + 1] = (se, ne, nw)
+            end
+            gc += 2
+        end
+    end
+
+    return points, conn
+end
+
+# ============================================================================
+# Graded Spacing for Mesh Refinement
+# ============================================================================
+
+"""
+    _graded_spacing(x0, x1, targets, h_far, h_near, r_transition) -> Vector{Float64}
+
+Build a non-uniform coordinate array that clusters points near `targets`.
+Spacing is **symmetric** around each target — the algorithm walks from both ends
+of every inter-target segment toward the midpoint and merges the results.
+
+- `x0, x1`: domain bounds
+- `targets`: locations requiring refinement (e.g., column coordinates)
+- `h_far`: far-field element size
+- `h_near`: near-target element size (must be ≤ h_far)
+- `r_transition`: distance over which spacing grades from h_near to h_far
+"""
+function _graded_spacing(x0::Float64, x1::Float64, targets::Vector{Float64},
+                         h_far::Float64, h_near::Float64, r_transition::Float64)
+    @assert h_near <= h_far "h_near ($h_near) must be ≤ h_far ($h_far)"
+    @assert x0 < x1 "x0 must be < x1"
+    @assert r_transition > 0 "r_transition must be > 0"
+    
+    # Protected target points (must survive dedup)
+    target_set = Set{Float64}([x0, x1])
+    for t in targets
+        if x0 ≤ t ≤ x1
+            push!(target_set, t)
+        end
+    end
+    
+    # Sorted list of mandatory "waypoints" (endpoints + interior targets)
+    waypoints = sort!(collect(target_set))
+    
+    # Collect all points
+    pts = Set{Float64}()
+    for wp in waypoints
+        push!(pts, wp)
+    end
+    
+    # Helper: local element size at position x
+    _h_at(x) = begin
+        d_min = Inf
+        for t in waypoints
+            d_min = min(d_min, abs(x - t))
+        end
+        ratio = clamp(d_min / r_transition, 0.0, 1.0)
+        h_near + ratio * (h_far - h_near)
+    end
+    
+    # For each segment [a, b], walk from BOTH ends toward the midpoint.
+    # This ensures spacing is symmetric around each waypoint.
+    for seg in 1:length(waypoints)-1
+        a, b = waypoints[seg], waypoints[seg+1]
+        mid = (a + b) / 2.0
+        
+        # Forward walk: a → mid
+        x = a
+        while x < mid - h_near * 0.05
+            h_local = _h_at(x)
+            x_next = min(x + h_local, mid)
+            push!(pts, x_next)
+            x = x_next
+        end
+        
+        # Backward walk: b → mid
+        x = b
+        while x > mid + h_near * 0.05
+            h_local = _h_at(x)
+            x_next = max(x - h_local, mid)
+            push!(pts, x_next)
+            x = x_next
+        end
+    end
+    
+    result = sort!(collect(pts))
+    
+    # Dedup close points, but never remove protected targets
+    min_spacing = h_near * 0.3
+    filtered = Float64[result[1]]
+    for i in 2:length(result)
+        gap = result[i] - filtered[end]
+        is_protected = result[i] in target_set
+        if gap > min_spacing || i == length(result) || is_protected
+            push!(filtered, result[i])
+        end
+    end
+    if filtered[end] != x1
+        push!(filtered, x1)
+    end
+    
+    return filtered
+end
+
+"""
+    _warn_mesh_density(h, Lx, Ly)
+
+Warn if the effective mesh density seems unreasonably coarse or fine.
+Thresholds are expressed in terms of effective `n` (divisions along the shortest side).
+"""
+function _warn_mesh_density(h::Float64, Lx::Float64, Ly::Float64)
+    L_min = min(Lx, Ly)
+    effective_n = L_min / h
+    if effective_n < 4
+        @warn "Shell mesh is very coarse (effective n ≈ $(round(effective_n, digits=1)) " *
+              "on shortest side). Consider reducing target_edge_length."
+    elseif effective_n > 100
+        @warn "Shell mesh is very fine (effective n ≈ $(round(effective_n, digits=1)) " *
+              "on shortest side). Consider increasing target_edge_length for faster analysis."
+    end
+end
+
+"""
+    _uniform_spacing(x0, x1, h) -> Vector{Float64}
+
+Build a uniform coordinate array with target spacing `h`.
+"""
+function _uniform_spacing(x0::Float64, x1::Float64, h::Float64)
+    n = max(1, ceil(Int, (x1 - x0) / h))
+    return collect(range(x0, x1, length=n+1))
+end
+
+"""
+    _is_rectangular(boundary_pts; tol=1e-6) -> Bool
+
+Check if a polygon is a (possibly rotated) axis-aligned rectangle.
+"""
+function _is_rectangular(boundary_pts::Vector{Tuple{Float64, Float64}}; tol::Float64=1e-6)
+    length(boundary_pts) != 4 && return false
+    
+    # Check that opposite edges are parallel and equal length
+    p1, p2, p3, p4 = boundary_pts
+    
+    # Edge vectors
+    e1 = (p2[1] - p1[1], p2[2] - p1[2])
+    e2 = (p3[1] - p2[1], p3[2] - p2[2])
+    e3 = (p4[1] - p3[1], p4[2] - p3[2])
+    e4 = (p1[1] - p4[1], p1[2] - p4[2])
+    
+    # Check axis-aligned: each edge should be horizontal or vertical
+    h1 = abs(e1[2]) < tol  # horizontal
+    v1 = abs(e1[1]) < tol  # vertical
+    h2 = abs(e2[2]) < tol
+    v2 = abs(e2[1]) < tol
+    h3 = abs(e3[2]) < tol
+    v3 = abs(e3[1]) < tol
+    h4 = abs(e4[2]) < tol
+    v4 = abs(e4[1]) < tol
+    
+    return (h1 || v1) && (h2 || v2) && (h3 || v3) && (h4 || v4)
+end
+
+# ============================================================================
+# SupportLine - internal representation of a support line (forward declaration)
+# ============================================================================
+# Defined here because _collect_refinement_targets (below) references the type.
+# Helper constructors and converters follow later in the file.
+
+"""
+Internal struct representing a support line for meshing.
+"""
+struct _SupportLine
+    start_pt::Tuple{Float64, Float64}  # (x, y) in meters
+    end_pt::Tuple{Float64, Float64}
+end
+
+"""
+    _collect_refinement_targets(interior_nodes, support_lines, patches)
+        -> Vector{Tuple{Float64,Float64}}
+
+Auto-detect mesh refinement targets from interior features only.
+Returns point locations (in meters) where the mesh should be refined.
+
+Targets are:
+1. Interior nodes (column connection points)
+2. Support-line endpoints (beam connections)
+3. Patch centroids (column footprints — stress concentrations)
+
+Boundary conditions (`edge_support_type`) are **not** considered here.
+Mesh refinement and DOF fixity are orthogonal concerns.
+"""
+function _collect_refinement_targets(
+    interior_nodes::Vector{Node},
+    support_lines::Vector{_SupportLine},
+    patches::Vector  # Vector{ShellPatch} — untyped to avoid forward-declaration order
+)
+    targets = Tuple{Float64, Float64}[]
+    
+    # 1. Interior nodes (column connection points)
+    for node in interior_nodes
+        push!(targets, (ustrip(u"m", node.position[1]), 
+                        ustrip(u"m", node.position[2])))
+    end
+    
+    # 2. Support line endpoints (beam connections)
+    for line in support_lines
+        push!(targets, line.start_pt)
+        push!(targets, line.end_pt)
+    end
+    
+    # 3. Patch centroids (column footprints — stress concentrations)
+    for patch in patches
+        push!(targets, patch.center)
+    end
+    
+    # Deduplicate
+    return unique(targets)
+end
 
 # ============================================================================
 # ShellSection - combines thickness and material properties
@@ -286,16 +585,9 @@ function Diaphragm(
 end
 
 # ============================================================================
-# SupportLine - internal representation of a support line
+# SupportLine - helper constructors and converters
 # ============================================================================
-
-"""
-Internal struct representing a support line for meshing.
-"""
-struct _SupportLine
-    start_pt::Tuple{Float64, Float64}  # (x, y) in meters
-    end_pt::Tuple{Float64, Float64}
-end
+# The struct itself is forward-declared above _collect_refinement_targets.
 
 """
 Extract support line geometry from an Element.
@@ -331,6 +623,178 @@ function _to_support_line(input)
     else
         error("interior_supports must contain Elements or (Node, Node) tuples")
     end
+end
+
+# ============================================================================
+# ShellPatch - stiffened region within a shell mesh
+# ============================================================================
+
+"""
+    ShellPatch(polygon, section; id=:patch)
+    ShellPatch(cx, cy, c1, c2, section; id=:patch)
+    ShellPatch(vertices, center, section, id)
+
+A stiffened region within a shell mesh, typically representing a column footprint.
+
+The polygon perimeter becomes **constrained edges** in the Delaunay triangulation,
+ensuring element boundaries align with the patch boundary. Triangles whose centroids
+fall inside the polygon receive `section` instead of the main shell section.
+
+# From Meshes.Ngon (handles any polygon shape, including circular approximations)
+```julia
+using Meshes
+stiff = ShellSection(0.5u"m", 200e9u"Pa", 0.3)
+patch = ShellPatch(
+    Quadrangle(Point(2.75, 2.75), Point(3.25, 2.75),
+               Point(3.25, 3.25), Point(2.75, 3.25)),
+    stiff)
+```
+
+# From center + dimensions (rectangular shorthand, in meters or Unitful)
+```julia
+patch = ShellPatch(3.0, 3.0, 0.5, 0.5, stiff)             # meters
+patch = ShellPatch(3.0u"m", 3.0u"m", 0.5u"m", 0.5u"m", stiff)  # Unitful
+```
+
+# Use with Shell()
+```julia
+shells = Shell(corners, section; interior_patches=[patch])
+```
+"""
+struct ShellPatch
+    vertices::Vector{Tuple{Float64, Float64}}  # polygon vertices (m)
+    center::Tuple{Float64, Float64}             # centroid (m)
+    section::ShellSection
+    id::Symbol
+
+    function ShellPatch(
+        vertices::Vector{Tuple{Float64, Float64}},
+        center::Tuple{Float64, Float64},
+        section::ShellSection,
+        id::Symbol = :patch
+    )
+        @assert length(vertices) >= 3 "ShellPatch requires at least 3 vertices"
+        return new(vertices, center, section, id)
+    end
+end
+
+# Constructor from Meshes.Ngon — auto-computes centroid via Meshes.centroid
+function ShellPatch(polygon::Meshes.Ngon, section::ShellSection; id::Symbol = :patch)
+    verts = Tuple{Float64, Float64}[]
+    for v in Meshes.vertices(polygon)
+        c = Meshes.coords(v)
+        push!(verts, (_coord_to_meters(c.x), _coord_to_meters(c.y)))
+    end
+    cen = Meshes.centroid(polygon)
+    cc = Meshes.coords(cen)
+    center = (_coord_to_meters(cc.x), _coord_to_meters(cc.y))
+    return ShellPatch(verts, center, section, id)
+end
+
+# Constructor from center + dimensions (rectangular, Float64 in meters)
+function ShellPatch(
+    cx::Float64, cy::Float64, c1::Float64, c2::Float64,
+    section::ShellSection;
+    id::Symbol = :patch
+)
+    verts = [
+        (cx - c1/2, cy - c2/2),
+        (cx + c1/2, cy - c2/2),
+        (cx + c1/2, cy + c2/2),
+        (cx - c1/2, cy + c2/2),
+    ]
+    return ShellPatch(verts, (cx, cy), section, id)
+end
+
+# Unitful overload
+function ShellPatch(
+    cx::Quantity, cy::Quantity, c1::Quantity, c2::Quantity,
+    section::ShellSection;
+    id::Symbol = :patch
+)
+    return ShellPatch(
+        Float64(ustrip(u"m", cx)), Float64(ustrip(u"m", cy)),
+        Float64(ustrip(u"m", c1)), Float64(ustrip(u"m", c2)),
+        section; id=id)
+end
+
+"""
+    _add_patch_geometry!(all_points, patches, boundary_pts) -> Set{Tuple{Int,Int}}
+
+Add patch vertex points to the mesh point list and return constrained segment
+index pairs for `DT.triangulate(...; segments=...)`.
+"""
+function _add_patch_geometry!(
+    all_points::Vector{Tuple{Float64, Float64}},
+    patches::Vector{ShellPatch},
+    boundary_pts::Vector{Tuple{Float64, Float64}}
+)
+    tol = 1e-6
+    round_coord(x) = round(Int64, x / tol)
+
+    # Build existing-point index for deduplication
+    existing = Dict{Tuple{Int64, Int64}, Int}()
+    for (i, pt) in enumerate(all_points)
+        existing[(round_coord(pt[1]), round_coord(pt[2]))] = i
+    end
+
+    segments = Set{Tuple{Int, Int}}()
+
+    for patch in patches
+        vertex_indices = Int[]
+
+        for v in patch.vertices
+            key = (round_coord(v[1]), round_coord(v[2]))
+            if haskey(existing, key)
+                push!(vertex_indices, existing[key])
+            else
+                if _point_inside_polygon(v, boundary_pts) ||
+                   _is_on_boundary_edge(v, boundary_pts, tol)
+                    push!(all_points, v)
+                    idx = length(all_points)
+                    existing[key] = idx
+                    push!(vertex_indices, idx)
+                end
+            end
+        end
+
+        # Constrained segments between consecutive vertices
+        nv = length(vertex_indices)
+        for i in 1:nv
+            j = mod1(i + 1, nv)
+            a, b = vertex_indices[i], vertex_indices[j]
+            a != b && push!(segments, (min(a, b), max(a, b)))
+        end
+    end
+
+    return segments
+end
+
+"""
+    _apply_patches!(shells, patches)
+
+Reassign section properties for shell elements whose centroids lie inside a patch.
+"""
+function _apply_patches!(shells::Vector{ShellTri3}, patches::Vector{ShellPatch})
+    isempty(patches) && return shells
+
+    for shell in shells
+        cx = sum(ustrip(u"m", n.position[1]) for n in shell.nodes) / 3.0
+        cy = sum(ustrip(u"m", n.position[2]) for n in shell.nodes) / 3.0
+
+        for patch in patches
+            if _point_inside_polygon((cx, cy), patch.vertices)
+                shell.thickness = patch.section.thickness
+                shell.E = patch.section.E
+                shell.ν = patch.section.ν
+                shell.ρ = patch.section.ρ
+                shell.id = patch.id
+                break  # first matching patch wins
+            end
+        end
+    end
+
+    return shells
 end
 
 # ============================================================================
@@ -382,7 +846,7 @@ end
 # ============================================================================
 
 """
-    Shell(corners, section; n=4, id=:shell, interior_supports=[], interior_nodes=[], edge_support_type=:pinned, interior_support_type=:pinned)
+    Shell(corners, section; n=4, target_edge_length=nothing, id=:shell, ...)
     Shell(corners, n, section; ...)
 
 Create triangular shell elements from any polygon with support conditions.
@@ -390,9 +854,24 @@ Create triangular shell elements from any polygon with support conditions.
 # Arguments
 - `corners`: Tuple or vector of corner `Node`s in counter-clockwise order
 - `section`: `ShellSection` defining thickness and material properties
-- `n`: Subdivision level (default: 4). Higher = finer mesh.
+- `n`: Subdivision level (default: 4). Higher = finer mesh. Ignored when `target_edge_length` is set.
 
-# Keyword Arguments
+# Keyword Arguments — mesh sizing
+- `target_edge_length`: Target element size (default: `0.25u"m"`). Overrides `n` when provided.
+  For rectangular panels **without refinement**, uses structured mesh; otherwise Delaunay.
+  Set to `nothing` to fall back to legacy `n`-based meshing.
+
+# Keyword Arguments — refinement
+- `refinement_edge_length`: Element size near refinement targets (e.g., `0.1u"m"`).
+  When set, mesh is graded: fine near targets, coarse elsewhere.
+- `refinement_radius`: Transition distance from fine to coarse (default: auto = 5× refinement_edge_length).
+- `refinement_targets`: Controls where to refine. Default `:auto`.
+  - `:auto` — auto-detect from `interior_nodes`, `interior_patches` centroids, and `interior_supports` endpoints.
+    Boundary conditions (`edge_support_type`) are NOT considered — mesh refinement and DOF fixity are orthogonal.
+  - `:none` — no refinement targets, even if `refinement_edge_length` is set (uniform mesh).
+  - `Vector{Node}` — explicit list of points to refine around.
+
+# Keyword Arguments — supports
 - `id::Symbol`: Element identifier (default: `:shell`)
 - `interior_supports`: List of interior support lines - Elements or (Node, Node) pairs. 
   Creates new mesh nodes with specified fixity along these lines.
@@ -409,30 +888,22 @@ Create triangular shell elements from any polygon with support conditions.
 - `:free` - no constraints (for edges that aren't supported)
 - `Vector{Bool}` - custom DOF pattern [x, y, z, θx, θy, θz]
 
-# Example
+# Examples
 ```julia
 section = ShellSection(0.15u"m", 30u"GPa", 0.2)
 
-# Simple slab (edges supported)
-shells = Shell((n1, n2, n3, n4), section)
+# Target edge length (uniform mesh)
+shells = Shell((n1, n2, n3, n4), section; target_edge_length=0.5u"m")
 
-# Multi-bay slab with interior beam (creates new support nodes)
+# With graded refinement near columns
 shells = Shell((n1, n2, n3, n4), section;
-    interior_supports = [interior_beam],
-    edge_support_type = :pinned,
-    interior_support_type = :pinned
+    target_edge_length = 0.5u"m",
+    interior_nodes = [col_top],
+    refinement_edge_length = 0.1u"m"
 )
 
-# Slab with interior column (shares actual node for structural connectivity)
-col_top = Node([2.0u"m", 2.0u"m", 0.0u"m"], :free)
-column = Element(col_base, col_top, col_section)
-shells = Shell((n1, n2, n3, n4), section;
-    interior_nodes = [col_top],  # Same node object used by column!
-    edge_support_type = :free
-)
-model = Model(nodes, [column], shells, loads)  # True frame-shell connectivity
-
-model = ShellModel(get_nodes(shells), shells, loads)
+# Legacy: subdivision level
+shells = Shell((n1, n2, n3, n4), 6, section)
 ```
 """
 function Shell(
@@ -442,8 +913,13 @@ function Shell(
     id::Symbol = :shell,
     interior_supports::Vector = [],
     interior_nodes::Vector{Node} = Node[],
+    interior_patches::Vector{ShellPatch} = ShellPatch[],
     edge_support_type::Union{Symbol, Vector{Bool}} = :pinned,
-    interior_support_type::Union{Symbol, Vector{Bool}} = :pinned
+    interior_support_type::Union{Symbol, Vector{Bool}} = :pinned,
+    target_edge_length::Union{Quantity, Real, Nothing} = nothing,
+    refinement_edge_length::Union{Quantity, Real, Nothing} = nothing,
+    refinement_radius::Union{Quantity, Real, Nothing} = nothing,
+    refinement_targets::Union{Symbol, Vector{Node}, Nothing} = :auto
 ) where N
     nc = length(corners)
     
@@ -451,92 +927,296 @@ function Shell(
     # Input Validation
     # ===========================================================================
     @assert nc >= 3 "Shell requires at least 3 corner nodes, got $nc"
-    @assert n >= 1 "Mesh refinement n must be at least 1, got $n"
     
     # Extract corner positions for validation
     boundary_pts = [(ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2])) 
                     for node in corners]
     
-    # Check for degenerate polygon (zero or negative area)
     area = _shoelace_area(boundary_pts)
     @assert abs(area) > 1e-12 "Shell polygon is degenerate (zero area). Check corner positions."
-    
-    # Check for self-intersection (simple polygon test)
     @assert !_is_self_intersecting(boundary_pts) "Shell polygon is self-intersecting. Corners must form a simple polygon."
     
     # ===========================================================================
-    # Mesh Generation
+    # Convert parameters to meters
     # ===========================================================================
+    h_far = if target_edge_length !== nothing
+        target_edge_length isa Quantity ? Float64(ustrip(u"m", target_edge_length)) : Float64(target_edge_length)
+    else
+        nothing
+    end
     
-    # Convert interior supports to _SupportLine
+    h_near = if refinement_edge_length !== nothing
+        refinement_edge_length isa Quantity ? Float64(ustrip(u"m", refinement_edge_length)) : Float64(refinement_edge_length)
+    else
+        nothing
+    end
+    
+    r_trans = if refinement_radius !== nothing
+        refinement_radius isa Quantity ? Float64(ustrip(u"m", refinement_radius)) : Float64(refinement_radius)
+    elseif h_near !== nothing
+        5.0 * h_near  # default: transition over 5× refinement size
+    else
+        nothing
+    end
+    
+    # Convert interior supports
     support_lines = [_to_support_line(s) for s in interior_supports]
     
-    # Extract interior node positions for mesh generation (type annotation needed for empty arrays)
-    interior_node_pts = Tuple{Float64, Float64}[(ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2])) 
-                         for node in interior_nodes]
-    
-    # Generate mesh points with supports and interior nodes
-    all_points, support_point_indices, interior_node_map = _generate_mesh_points_with_supports(
-        boundary_pts, n, support_lines, interior_node_pts)
-    
-    # Build constrained triangulation
-    boundary_loop = vcat(collect(1:nc), [1])
-    tri = DT.triangulate(all_points; boundary_nodes=[boundary_loop])
-    
-    # Compute average z for interior nodes
-    z_val = sum(ustrip(u"m", node.position[3]) for node in corners) / nc
-    
-    # Create node map
-    points = DT.get_points(tri)
-    node_map = Dict{Int, Node}()
-    edge_node_indices = Set{Int}()
-    
-    # Track which point indices are on edges
-    tol = 1e-6
-    for (idx, pt) in enumerate(points)
-        if _is_on_boundary_edge(pt, boundary_pts, tol)
-            push!(edge_node_indices, idx)
-        end
-    end
-    
-    # Map corner nodes (indices 1:nc) - corners keep their original fixity
-    for (i, corner) in enumerate(corners)
-        node_map[i] = corner
-    end
-    
-    # Map interior nodes to their point indices (use actual node objects for structural connectivity)
-    for (input_idx, point_idx) in interior_node_map
-        node_map[point_idx] = interior_nodes[input_idx]
-    end
-    
-    # Create non-corner, non-interior-node nodes
-    for i in (nc+1):length(points)
-        # Skip if already mapped (interior node)
-        haskey(node_map, i) && continue
-        
-        pt = points[i]
-        pos = [pt[1], pt[2], z_val] .* u"m"
-        
-        # Determine fixity based on location
-        if i in support_point_indices
-            # Interior support line node
-            fixity = interior_support_type
-        elseif i in edge_node_indices
-            # Edge node (not corner)
-            fixity = edge_support_type
+    # ===========================================================================
+    # Resolve refinement targets
+    # ===========================================================================
+    # refinement_targets controls WHERE to refine:
+    #   :auto (default) — auto-detect from interior_nodes + patches + support lines
+    #   :none           — no refinement targets (uniform mesh even with h_near set)
+    #   Vector{Node}    — explicit list of points to refine around
+    #   nothing         — treated as :auto (backwards compatibility)
+    refine_pts = if h_near !== nothing
+        if refinement_targets isa Vector
+            # Explicit targets (Vector{Node})
+            Tuple{Float64, Float64}[(ustrip(u"m", nd.position[1]), 
+                                     ustrip(u"m", nd.position[2])) for nd in refinement_targets]
+        elseif refinement_targets === :none
+            Tuple{Float64, Float64}[]
         else
-            # Pure interior node
-            fixity = :free
+            # :auto or nothing — auto-detect from interior features
+            _collect_refinement_targets(interior_nodes, support_lines, interior_patches)
         end
-        
-        node_map[i] = _create_node_with_fixity(pos, fixity, id)
+    else
+        Tuple{Float64, Float64}[]
     end
     
-    # Create shell elements
-    return _create_shells_from_tri(tri, node_map, section, id)
+    # ===========================================================================
+    # Bounding box
+    # ===========================================================================
+    xmin = minimum(p[1] for p in boundary_pts)
+    xmax = maximum(p[1] for p in boundary_pts)
+    ymin = minimum(p[2] for p in boundary_pts)
+    ymax = maximum(p[2] for p in boundary_pts)
+    Lx = xmax - xmin
+    Ly = ymax - ymin
+    
+    # Warn if mesh density looks unreasonable
+    if h_far !== nothing
+        _warn_mesh_density(h_far, Lx, Ly)
+    end
+    
+    # ===========================================================================
+    # Decide meshing strategy
+    # ===========================================================================
+    # Structured mesh only for uniform rectangular panels (no refinement).
+    # When refinement is requested, Delaunay + rings is always better because it
+    # refines radially/locally instead of creating axis-aligned dense bands.
+    use_structured = h_far !== nothing && h_near === nothing && _is_rectangular(boundary_pts) && isempty(support_lines) && isempty(interior_nodes) && isempty(interior_patches)
+    
+    if use_structured
+        # ── Structured mesh (T3blockx) ──
+        target_xs = [pt[1] for pt in refine_pts]
+        target_ys = [pt[2] for pt in refine_pts]
+        
+        if h_near !== nothing && !isempty(refine_pts)
+            xs = _graded_spacing(xmin, xmax, target_xs, h_far, h_near, r_trans)
+            ys = _graded_spacing(ymin, ymax, target_ys, h_far, h_near, r_trans)
+        else
+            xs = _uniform_spacing(xmin, xmax, h_far)
+            ys = _uniform_spacing(ymin, ymax, h_far)
+        end
+        
+        return _create_shells_from_structured(
+            xs, ys, corners, boundary_pts, interior_nodes, section, id,
+            edge_support_type, interior_support_type)
+    else
+        # ── Delaunay mesh ──
+        # Two strategies:
+        #   A) Refinement requested (h_near set) → Minimal seed mesh +
+        #      Ruppert refinement.  Start with only boundary + interior
+        #      nodes + patch vertices.  Let DT.refine! optimally place all
+        #      Steiner points — avoids the near-collinear grid points that
+        #      cause refine! to crash.
+        #   B) No refinement → Dense grid mesh via _generate_mesh_points.
+        
+        # Compute effective n (used for grid-based path)
+        effective_n = if h_far !== nothing
+            max(1, ceil(Int, max(Lx, Ly) / h_far))
+        else
+            n
+        end
+        @assert effective_n >= 1 "Mesh refinement n must be at least 1"
+        
+        # Extract interior node positions
+        interior_node_pts = Tuple{Float64, Float64}[(ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2])) 
+                             for node in interior_nodes]
+        
+        want_refinement = h_near !== nothing && !isempty(refine_pts)
+        
+        if want_refinement
+            # ── Strategy A: Minimal seed + Ruppert ──
+            # Build a minimal point set: boundary corners + interior nodes
+            # + patch vertices.  No grid subdivision — refine! handles that.
+            tol_dedup = 1e-6
+            round_coord(x) = round(Int64, x / tol_dedup)
+            
+            seed_points = copy(boundary_pts)  # indices 1:nc
+            existing_keys = Set{Tuple{Int64,Int64}}(
+                (round_coord(p[1]), round_coord(p[2])) for p in boundary_pts)
+            
+            # Track which seed-point index corresponds to each interior node
+            interior_node_map = Dict{Int, Int}()
+            for (idx, pt) in enumerate(interior_node_pts)
+                key = (round_coord(pt[1]), round_coord(pt[2]))
+                if key ∉ existing_keys
+                    if _point_inside_polygon(pt, boundary_pts) ||
+                       _is_on_boundary_edge(pt, boundary_pts, tol_dedup)
+                        push!(seed_points, pt)
+                        interior_node_map[idx] = length(seed_points)
+                        push!(existing_keys, key)
+                    end
+                end
+            end
+            
+            # Add patch vertices (no constrained segments — see comment below)
+            if !isempty(interior_patches)
+                _add_patch_geometry!(seed_points, interior_patches, boundary_pts)
+            end
+            
+            boundary_loop = vcat(collect(1:nc), [1])
+            tri = DT.triangulate(seed_points; boundary_nodes=[boundary_loop])
+            
+            # Ruppert refinement: spatially-varying area constraint
+            far_h  = h_far !== nothing ? h_far : max(Lx, Ly) / max(effective_n, 1)
+            A_far  = 0.433 * far_h^2
+            A_near = 0.433 * h_near^2
+            r_transition = r_trans !== nothing ? r_trans : 5.0 * h_near
+
+            function _needs_refine(_tri, T)
+                i, j, k = DT.triangle_vertices(T)
+                p, q, r = DT.get_point(_tri, i, j, k)
+                A = abs(DT.triangle_area(p, q, r))
+                cx = (p[1] + q[1] + r[1]) / 3
+                cy = (p[2] + q[2] + r[2]) / 3
+                d_min = minimum(hypot(cx - t[1], cy - t[2]) for t in refine_pts)
+                α = clamp(d_min / r_transition, 0.0, 1.0)
+                A_limit = A_near + α * (A_far - A_near)
+                return A > A_limit
+            end
+
+            max_pts = max(5000, 20 * length(seed_points))
+            tri_backup = deepcopy(tri)
+            try
+                DT.refine!(tri; min_angle=30.0, custom_constraint=_needs_refine,
+                           max_points=max_pts)
+            catch e
+                @warn "Ruppert refinement failed — falling back to grid mesh" exception=(e, catch_backtrace())
+                # Fall back to grid-based mesh (Strategy B)
+                tri = nothing  # signal to use grid path below
+            end
+            
+            if tri !== nothing
+                # Build node map from the refined triangulation
+                z_val = sum(ustrip(u"m", node.position[3]) for node in corners) / nc
+                points = DT.get_points(tri)
+                node_map = Dict{Int, Node}()
+                edge_node_indices = Set{Int}()
+                
+                tol = 1e-6
+                for (idx, pt) in enumerate(points)
+                    if _is_on_boundary_edge(pt, boundary_pts, tol)
+                        push!(edge_node_indices, idx)
+                    end
+                end
+                
+                for (i, corner) in enumerate(corners)
+                    node_map[i] = corner
+                end
+                
+                for (input_idx, point_idx) in interior_node_map
+                    node_map[point_idx] = interior_nodes[input_idx]
+                end
+                
+                for i in (nc+1):length(points)
+                    haskey(node_map, i) && continue
+                    pt = points[i]
+                    pos = [pt[1], pt[2], z_val] .* u"m"
+                    fixity = if i in edge_node_indices
+                        edge_support_type
+                    else
+                        :free
+                    end
+                    node_map[i] = _create_node_with_fixity(pos, fixity, id)
+                end
+                
+                shells = _create_shells_from_tri(tri, node_map, section, id)
+                
+                if !isempty(interior_patches)
+                    _apply_patches!(shells, interior_patches)
+                end
+                
+                return shells
+            end
+            # If we fall through here, tri was set to nothing — use grid path
+        end
+        
+        # ── Strategy B: Dense grid mesh (no Ruppert) ──
+        all_points, support_point_indices, interior_node_map = _generate_mesh_points_with_supports(
+            boundary_pts, effective_n, support_lines, interior_node_pts)
+        
+        # Add patch vertices as regular mesh points (no constrained segments).
+        # _apply_patches! assigns stiffened sections by centroid check, so
+        # strict edge conformity is not required.
+        if !isempty(interior_patches)
+            _add_patch_geometry!(all_points, interior_patches, boundary_pts)
+        end
+        
+        boundary_loop = vcat(collect(1:nc), [1])
+        tri = DT.triangulate(all_points; boundary_nodes=[boundary_loop])
+        
+        z_val = sum(ustrip(u"m", node.position[3]) for node in corners) / nc
+        
+        points = DT.get_points(tri)
+        node_map = Dict{Int, Node}()
+        edge_node_indices = Set{Int}()
+        
+        tol = 1e-6
+        for (idx, pt) in enumerate(points)
+            if _is_on_boundary_edge(pt, boundary_pts, tol)
+                push!(edge_node_indices, idx)
+            end
+        end
+        
+        for (i, corner) in enumerate(corners)
+            node_map[i] = corner
+        end
+        
+        for (input_idx, point_idx) in interior_node_map
+            node_map[point_idx] = interior_nodes[input_idx]
+        end
+        
+        for i in (nc+1):length(points)
+            haskey(node_map, i) && continue
+            pt = points[i]
+            pos = [pt[1], pt[2], z_val] .* u"m"
+            
+            if i in support_point_indices
+                fixity = interior_support_type
+            elseif i in edge_node_indices
+                fixity = edge_support_type
+            else
+                fixity = :free
+            end
+            
+            node_map[i] = _create_node_with_fixity(pos, fixity, id)
+        end
+        
+        shells = _create_shells_from_tri(tri, node_map, section, id)
+        
+        if !isempty(interior_patches)
+            _apply_patches!(shells, interior_patches)
+        end
+        
+        return shells
+    end
 end
 
-# Default n=4
+# Keyword-n version (default target_edge_length=0.25m)
 function Shell(
     corners::Union{NTuple{N, Node}, Vector{Node}},
     section::ShellSection;
@@ -544,15 +1224,25 @@ function Shell(
     id::Symbol = :shell,
     interior_supports::Vector = [],
     interior_nodes::Vector{Node} = Node[],
+    interior_patches::Vector{ShellPatch} = ShellPatch[],
     edge_support_type::Union{Symbol, Vector{Bool}} = :pinned,
-    interior_support_type::Union{Symbol, Vector{Bool}} = :pinned
+    interior_support_type::Union{Symbol, Vector{Bool}} = :pinned,
+    target_edge_length::Union{Quantity, Real, Nothing} = 0.25u"m",
+    refinement_edge_length::Union{Quantity, Real, Nothing} = nothing,
+    refinement_radius::Union{Quantity, Real, Nothing} = nothing,
+    refinement_targets::Union{Symbol, Vector{Node}, Nothing} = :auto
 ) where N
     return Shell(corners, n, section; 
         id=id, 
         interior_supports=interior_supports,
         interior_nodes=interior_nodes,
+        interior_patches=interior_patches,
         edge_support_type=edge_support_type,
-        interior_support_type=interior_support_type
+        interior_support_type=interior_support_type,
+        target_edge_length=target_edge_length,
+        refinement_edge_length=refinement_edge_length,
+        refinement_radius=refinement_radius,
+        refinement_targets=refinement_targets
     )
 end
 
@@ -1267,4 +1957,163 @@ function _point_inside_polygon(pt::Tuple{Float64, Float64}, polygon::Vector{Tupl
     end
     
     return inside
+end
+
+# ============================================================================
+# Structured mesh → ShellTri3 elements
+# ============================================================================
+
+"""
+    _create_shells_from_structured(xs, ys, corners, boundary_pts, interior_nodes,
+                                    section, id, edge_support_type, interior_support_type)
+
+Build ShellTri3 elements from a structured rectangular grid via `_t3blockx`.
+Maps grid nodes to Asap `Node`s with appropriate fixities.
+"""
+function _create_shells_from_structured(
+    xs::Vector{Float64},
+    ys::Vector{Float64},
+    corners,
+    boundary_pts::Vector{Tuple{Float64, Float64}},
+    interior_nodes::Vector{Node},
+    section::ShellSection,
+    id::Symbol,
+    edge_support_type::Union{Symbol, Vector{Bool}},
+    interior_support_type::Union{Symbol, Vector{Bool}}
+)
+    # Generate structured mesh
+    mesh_pts, mesh_conn = _t3blockx(xs, ys)
+    
+    # Average z from corners
+    nc = length(corners)
+    z_val = sum(ustrip(u"m", node.position[3]) for node in corners) / nc
+    
+    tol = 1e-6
+    
+    # Build map from interior node positions to actual Node objects (for structural connectivity)
+    interior_map = Dict{Tuple{Int64, Int64}, Node}()
+    round_coord(x) = round(Int64, x / tol)
+    for nd in interior_nodes
+        key = (round_coord(ustrip(u"m", nd.position[1])),
+               round_coord(ustrip(u"m", nd.position[2])))
+        interior_map[key] = nd
+    end
+    
+    # Build map from corner positions to actual corner Node objects
+    corner_map = Dict{Tuple{Int64, Int64}, Node}()
+    for corner in corners
+        key = (round_coord(ustrip(u"m", corner.position[1])),
+               round_coord(ustrip(u"m", corner.position[2])))
+        corner_map[key] = corner
+    end
+    
+    # Create nodes for each mesh point
+    node_array = Vector{Node}(undef, length(mesh_pts))
+    
+    for (i, pt) in enumerate(mesh_pts)
+        key = (round_coord(pt[1]), round_coord(pt[2]))
+        
+        if haskey(corner_map, key)
+            # Use the actual corner node
+            node_array[i] = corner_map[key]
+        elseif haskey(interior_map, key)
+            # Use the actual interior node (structural connectivity)
+            node_array[i] = interior_map[key]
+        else
+            pos = [pt[1], pt[2], z_val] .* u"m"
+            
+            # Determine fixity
+            is_edge = _is_on_boundary_edge(pt, boundary_pts, tol)
+            fixity = is_edge ? edge_support_type : :free
+            
+            node_array[i] = _create_node_with_fixity(pos, fixity, id)
+        end
+    end
+    
+    # Create shell elements
+    thickness_q = section.thickness * u"m"
+    shells = ShellTri3[]
+    for (i, j, k) in mesh_conn
+        push!(shells, ShellTri3(
+            (node_array[i], node_array[j], node_array[k]),
+            thickness_q,
+            section.E * u"Pa",
+            section.ν;
+            ρ=section.ρ,
+            id=id
+        ))
+    end
+    
+    return shells
+end
+
+# ============================================================================
+# Refinement rings for Delaunay meshing
+# ============================================================================
+
+"""
+    _add_refinement_rings!(all_points, refine_pts, h_near, r_transition,
+                           boundary_pts, patches=ShellPatch[])
+
+Add concentric rings of points around each refinement target to improve
+Delaunay mesh density near supports.
+
+Points are discarded if they:
+- fall outside the slab boundary polygon,
+- duplicate an existing mesh point, or
+- fall **inside any ShellPatch** interior (column footprint).  Placing ring
+  points inside a patch creates degenerate slivers between the ring nodes
+  and the patch's constrained edges, tanking the stiffness-matrix condition
+  number.  Patch geometry must be added to `all_points` *before* calling
+  this function.
+"""
+function _add_refinement_rings!(
+    all_points::Vector{Tuple{Float64, Float64}},
+    refine_pts::Vector{Tuple{Float64, Float64}},
+    h_near::Float64,
+    r_transition::Float64,
+    boundary_pts::Vector{Tuple{Float64, Float64}},
+    patches::Vector{ShellPatch} = ShellPatch[]
+)
+    tol = 1e-6
+    round_coord(x) = round(Int64, x / tol)
+    
+    # Existing point set for deduplication
+    existing = Set{Tuple{Int64, Int64}}()
+    for pt in all_points
+        push!(existing, (round_coord(pt[1]), round_coord(pt[2])))
+    end
+
+    # Precompute patch vertex arrays for point-in-polygon tests
+    patch_polys = [p.vertices for p in patches]
+    
+    for center in refine_pts
+        # Add rings at increasing radii
+        radii = Float64[]
+        r = h_near
+        while r < r_transition
+            push!(radii, r)
+            r *= 1.6  # growth factor
+        end
+        
+        for r in radii
+            # Number of points on this ring (circumference / desired spacing)
+            n_ring = max(6, round(Int, 2π * r / h_near))
+            for k in 0:n_ring-1
+                θ = 2π * k / n_ring
+                pt = (center[1] + r * cos(θ), center[2] + r * sin(θ))
+                key = (round_coord(pt[1]), round_coord(pt[2]))
+                
+                # Skip duplicates
+                key in existing && continue
+                # Must be inside the slab boundary
+                _point_inside_polygon(pt, boundary_pts) || continue
+                # Must NOT be inside any patch interior
+                any(poly -> _point_inside_polygon(pt, poly), patch_polys) && continue
+                
+                push!(all_points, pt)
+                push!(existing, key)
+            end
+        end
+    end
 end

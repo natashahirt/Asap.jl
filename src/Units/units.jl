@@ -18,20 +18,20 @@ using Unitful: lbf  # Built-in Unitful unit
 # US Customary Units
 # =============================================================================
 
-"""Kilopound-force: 1 kip = 1000 lbf = 4448.22 N"""
-Unitful.@unit kip "kip" Kip 4448.2216152605u"N" false
+"""Kilopound-force: 1 kip = 1000 lbf"""
+Unitful.@unit kip "kip" Kip 1000u"lbf" false
 
-"""Kips per square inch: 1 ksi = 1000 psi = 6.895 MPa"""
-Unitful.@unit ksi "ksi" KipPerSquareInch 6.894757e6u"Pa" false
+"""Kips per square inch: 1 ksi = 1000 psi (derived from Unitful psi, not hardcoded Pa)"""
+Unitful.@unit ksi "ksi" KipPerSquareInch 1000u"psi" false
 
-"""Pounds per square foot: 1 psf = 1 lbf/ft² = 47.88 Pa"""
-Unitful.@unit psf "psf" PoundPerSquareFoot 47.88025898u"Pa" false
+"""Pounds per square foot: 1 psf = 1 lbf/ft²"""
+Unitful.@unit psf "psf" PoundPerSquareFoot 1u"lbf/ft^2" false
 
-"""Kips per square foot: 1 ksf = 1000 psf"""
-Unitful.@unit ksf "ksf" KipPerSquareFoot 47880.25898u"Pa" false
+"""Kips per square foot: 1 ksf = 1000 lbf/ft²"""
+Unitful.@unit ksf "ksf" KipPerSquareFoot 1000u"lbf/ft^2" false
 
 """Pounds per cubic foot: 1 pcf = 1 lb/ft³"""
-Unitful.@unit pcf "pcf" PoundPerCubicFoot 16.01846337u"kg/m^3" false
+Unitful.@unit pcf "pcf" PoundPerCubicFoot 1u"lb/ft^3" false
 
 # =============================================================================
 # Physical Constants
@@ -40,9 +40,6 @@ Unitful.@unit pcf "pcf" PoundPerCubicFoot 16.01846337u"kg/m^3" false
 """Standard gravity acceleration."""
 const GRAVITY = 9.80665u"m/s^2"
 
-"""Standard gravity as Float64 (for backward compatibility)."""
-const STANDARD_GRAVITY = GRAVITY
-const STANDARD_GRAVITY_F64 = 9.80665
 
 # =============================================================================
 # Dimension-Based Type Aliases
@@ -55,8 +52,11 @@ const Length = Unitful.Quantity{T, Unitful.𝐋, U} where {T<:Real, U}
 """Area quantity (m², ft², inch², etc.)"""
 const Area = Unitful.Quantity{T, Unitful.𝐋^2, U} where {T<:Real, U}
 
-"""Volume or section modulus quantity (m³, ft³, inch³, etc.)"""
+"""Volume quantity (m³, ft³, inch³, etc.)"""
 const Volume = Unitful.Quantity{T, Unitful.𝐋^3, U} where {T<:Real, U}
+
+"""Section modulus (same L³ dimension as Volume, but semantically distinct)."""
+const SectionModulus = Volume
 
 """Second moment of area (m⁴, ft⁴, inch⁴, etc.) - used for beam bending I = ∫y²dA"""
 const SecondMomentOfArea = Unitful.Quantity{T, Unitful.𝐋^4, U} where {T<:Real, U}
@@ -94,12 +94,6 @@ const Density = Unitful.Quantity{T, Unitful.𝐌*Unitful.𝐋^-3, U} where {T<:R
 """Acceleration quantity (m/s², ft/s², etc.)"""
 const Acceleration = Unitful.Quantity{T, Unitful.𝐋*Unitful.𝐓^-2, U} where {T<:Real, U}
 
-# Legacy aliases for Asap internal use
-const QuantityDistance = Length
-const QuantityForce = Force
-const QuantityPressure = Pressure
-const QuantityDensity = Density
-const QuantityAcceleration = Acceleration
 
 # =============================================================================
 # Concrete Type Aliases (for struct fields with Float64 precision)
@@ -128,15 +122,6 @@ const MomentQuantity = typeof(1.0u"N*m")
 """Distributed load in N/m (internal storage)."""
 const ForcePerLength = typeof(1.0u"N/m")
 
-# =============================================================================
-# Concrete Type Unions (for input validation)
-# =============================================================================
-
-"""Distance units: m, mm, cm, ft, inch."""
-const Distance = Union{
-    typeof(1.0u"m"), typeof(1.0u"mm"), typeof(1.0u"cm"),
-    typeof(1.0u"ft"), typeof(1.0u"inch")
-}
 
 # =============================================================================
 # Unit Conversion Helpers - US Customary
@@ -283,6 +268,18 @@ function to_reaction_vec(v::Vector{Quantity})
     end
     return result
 end
+
+# =============================================================================
+# Float64 Conversion Factors (for catalog parsing)
+# =============================================================================
+# Use these when building Unitful quantities from raw CSV data.
+# Avoids Rational{Int64} overflow in Unitful at high powers (inch⁶ → m⁶).
+
+const IN_TO_M   = 0.0254
+const IN2_TO_M2 = IN_TO_M^2
+const IN3_TO_M3 = IN_TO_M^3
+const IN4_TO_M4 = IN_TO_M^4
+const IN6_TO_M6 = IN_TO_M^6
 
 # =============================================================================
 # CSV/Catalog Parsing Utilities

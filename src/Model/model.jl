@@ -86,6 +86,8 @@ mutable struct FrameModel{E,L} <: ElementModel
     compliance::Float64
     tol::Float64
     processed::Bool
+    _factorization::Any   # Cached stiffness factorization (nothing if stale)
+    _elemental_loads::Union{Nothing, Vector{Vector{AbstractLoad}}}  # Lazy cache
     
     function FrameModel(nodes::Vector{Node}, elements::Vector{E}, loads::Vector{L}) where {E<:FrameElement, L<:AbstractLoad}
         nnodes = length(nodes)
@@ -108,7 +110,9 @@ mutable struct FrameModel{E,L} <: ElementModel
             zeros(6nnodes),
             0.0,
             1e-6,
-            false
+            false,
+            nothing,
+            nothing
         )
 
         return structure
@@ -143,6 +147,7 @@ mutable struct ShellModel{E<:ShellElement,L<:AbstractLoad} <: ElementModel
     compliance::Float64
     tol::Float64
     processed::Bool
+    _factorization::Any   # Cached stiffness factorization (nothing if stale)
     
     function ShellModel(nodes::Vector{Node}, elements::Vector{E}, loads::Vector{L}) where {E<:ShellElement, L<:AbstractLoad}
         nnodes = length(nodes)
@@ -164,7 +169,8 @@ mutable struct ShellModel{E<:ShellElement,L<:AbstractLoad} <: ElementModel
             zeros(6nnodes),
             0.0,
             1e-6,
-            false
+            false,
+            nothing
         )
 
         return structure
@@ -215,6 +221,8 @@ mutable struct Model <: AbstractModel
     compliance::Float64
     tol::Float64
     processed::Bool
+    _factorization::Any   # Cached stiffness factorization (nothing if stale)
+    _elemental_loads::Union{Nothing, Vector{Vector{AbstractLoad}}}  # Lazy cache
     
     # Full constructor: frame + shell elements
     function Model(
@@ -250,7 +258,9 @@ mutable struct Model <: AbstractModel
             zeros(6nnodes),
             0.0,
             1e-6,
-            false
+            false,
+            nothing,
+            nothing
         )
     end
 end
@@ -342,6 +352,45 @@ function Base.getproperty(model::Model, name::Symbol)
     end
 end
 
+# =============================================================================
+# Factorization Cache Helpers
+# =============================================================================
+
+"""
+    factorize!(model::AbstractModel)
+
+Compute and cache the stiffness factorization for the free DOFs.
+Reuse with `solve_factorized!` to avoid re-factorizing when only loads change.
+
+Uses Cholesky (CHOLMOD) for SPD matrices, LDLT (CHOLMOD) for symmetric
+indefinite, falls back to LU (UMFPACK).
+"""
+function factorize!(model::AbstractModel)
+    model.processed || error("Model must be processed before factorizing. Call process!(model) first.")
+    idx = model.freeDOFs
+    K = Symmetric(model.S[idx, idx])
+    fact = cholesky(K; check=false)
+    if !issuccess(fact)
+        @warn "Stiffness matrix not SPD — trying LDLᵀ"
+        fact = ldlt(K; check=false)
+        if !issuccess(fact)
+            @warn "LDLᵀ failed — falling back to LU"
+            fact = lu(model.S[idx, idx])
+        end
+    end
+    model._factorization = fact
+    return model._factorization
+end
+
+"""
+    clear_factorization!(model::AbstractModel)
+
+Invalidate the cached factorization (call after stiffness changes).
+"""
+function clear_factorization!(model::AbstractModel)
+    model._factorization = nothing
+end
+
 # Provide .shells as alias for .elements in ShellModel for unified API
 function Base.getproperty(model::ShellModel, name::Symbol)
     if name === :shells
@@ -411,6 +460,7 @@ mutable struct TrussModel <: ElementModel
     compliance::Float64
     tol::Float64
     processed::Bool
+    _factorization::Any   # Cached stiffness factorization (nothing if stale)
     
     function TrussModel(nodes::Vector{TrussNode}, elements::Vector{TrussElement}, loads::Vector{NodeForce})
         nnodes = length(nodes)
@@ -432,7 +482,8 @@ mutable struct TrussModel <: ElementModel
             zeros(3nnodes),
             0.0,
             1e-6,
-            false
+            false,
+            nothing
         )
 
         return structure

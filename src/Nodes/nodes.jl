@@ -22,7 +22,7 @@ Node([4.3u"m", 2.2u"m", 10.4u"m"], :zfixed)
 ```
 """
 mutable struct Node <: AbstractNode
-    position::Vector{QuantityDistance}
+    position::Vector{Length}
     dof::Vector{Bool}
     nodeID::Int64
     globalID::Vector{Int64}
@@ -93,7 +93,7 @@ TrussNode([1.0u"m", 1.0u"m", 56.0u"m"], :pinned)
 ```
 """
 mutable struct TrussNode <: AbstractNode
-    position::Vector{QuantityDistance}
+    position::Vector{Length}
     dof::Vector{Bool}
     nodeID::Int64
     globalID::Vector{Int64}

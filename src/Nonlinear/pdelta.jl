@@ -144,8 +144,8 @@ function solve_pdelta!(model::FrameModel;
     end
     
     # Calculate amplification factor
-    u_max_first = maximum(abs.(u_first))
-    u_max_final = maximum(abs.(model.u))
+    u_max_first = mapreduce(abs, max, u_first)
+    u_max_final = mapreduce(abs, max, model.u)
     amplification = u_max_first > 1e-10 ? u_max_final / u_max_first : 1.0
     
     # Calculate maximum drift ratio (simplified - assumes vertical columns)
@@ -221,8 +221,8 @@ function solve_pdelta!(model::Model;
         u_prev = copy(model.u)
     end
     
-    u_max_first = maximum(abs.(u_first))
-    u_max_final = maximum(abs.(model.u))
+    u_max_first = mapreduce(abs, max, u_first)
+    u_max_final = mapreduce(abs, max, model.u)
     amplification = u_max_first > 1e-10 ? u_max_final / u_max_first : 1.0
     
     max_drift_ratio = compute_max_drift_ratio(model)

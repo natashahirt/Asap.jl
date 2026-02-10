@@ -15,9 +15,9 @@ Material(200u"GPa", 77u"GPa", 7850u"kg/m^3", 0.3)
 ```
 """
 struct Material
-    E::QuantityPressure #young's modulus
-    G::QuantityPressure #shear modulus
-    ρ::QuantityDensity #density
+    E::Pressure   # Young's modulus
+    G::Pressure   # Shear modulus
+    ρ::Density    # Density
     ν::Float64 #poisson's ratio
 
     function Material(E::Quantity, G::Quantity, ρ::Quantity, ν::Real)

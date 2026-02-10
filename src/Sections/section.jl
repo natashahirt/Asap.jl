@@ -1,4 +1,4 @@
-abstract type AbstractSection end
+abstract type AbstractCrossSection end
 
 """
     Section(A, E, G, Ix, Iy, J, ρ=1.0u"kg/m^3"; Ay=Inf*u"m^2", Az=Inf*u"m^2")
@@ -7,15 +7,15 @@ abstract type AbstractSection end
 A cross section assigned to an element.
 
 # Fields
-- `A` Area [Distance²]
+- `A` Area [L²]
 - `E` Modulus of Elasticity [Pressure]
 - `G` Shear Modulus [Pressure]  
-- `Ix` Strong axis moment of inertia [Distance⁴]
-- `Iy` Weak axis moment of inertia [Distance⁴]
-- `J` Torsional constant [Distance⁴]
-- `ρ` Density [Mass/Distance³]
-- `Ay` Effective shear area in Y direction [Distance²] (default: Inf for Bernoulli-Euler)
-- `Az` Effective shear area in Z direction [Distance²] (default: Inf for Bernoulli-Euler)
+- `Ix` Strong axis moment of inertia [L⁴]
+- `Iy` Weak axis moment of inertia [L⁴]
+- `J` Torsional constant [L⁴]
+- `ρ` Density [M/L³]
+- `Ay` Effective shear area in Y direction [L²] (default: Inf for Bernoulli-Euler)
+- `Az` Effective shear area in Z direction [L²] (default: Inf for Bernoulli-Euler)
 
 # Beam Formulation
 - **Bernoulli-Euler** (default): Set `Ay=Inf, Az=Inf` - shear-rigid, good for slender beams
@@ -34,16 +34,16 @@ Section(0.01u"m^2", 200u"GPa", 77u"GPa", 1e-4u"m^4", 1e-4u"m^4", 1e-4u"m^4";
         Ay=0.0083u"m^2", Az=0.0083u"m^2")
 ```
 """
-struct Section <: AbstractSection
+struct Section <: AbstractCrossSection
     A::Area                 # Area
-    E::QuantityPressure     # Young's modulus
-    G::QuantityPressure     # Shear modulus
+    E::Pressure             # Young's modulus
+    G::Pressure             # Shear modulus
     Ix::MomentOfInertia     # Strong axis I
     Iy::MomentOfInertia     # Weak axis I
     J::MomentOfInertia      # Torsional constant
-    ρ::QuantityDensity      # Density
-    Ay::Float64             # Shear area Y (stored as Float64 in m², Inf for Bernoulli-Euler)
-    Az::Float64             # Shear area Z (stored as Float64 in m², Inf for Bernoulli-Euler)
+    ρ::Density              # Density
+    Ay::Area                # Effective shear area Y (Inf m² for Bernoulli-Euler)
+    Az::Area                # Effective shear area Z (Inf m² for Bernoulli-Euler)
 
     function Section(
         A::Quantity,
@@ -53,36 +53,31 @@ struct Section <: AbstractSection
         Iy::Quantity,
         J::Quantity,
         ρ::Quantity = 1.0u"kg/m^3";
-        Ay::Union{Quantity, Real} = Inf,
-        Az::Union{Quantity, Real} = Inf
+        Ay::Union{Quantity, Real} = Inf * u"m^2",
+        Az::Union{Quantity, Real} = Inf * u"m^2"
     )
-        # Convert all to base SI units
-        A_si = uconvert(u"m^2", A)
-        E_si = uconvert(u"Pa", E)
-        G_si = uconvert(u"Pa", G)
+        A_si  = uconvert(u"m^2", A)
+        E_si  = uconvert(u"Pa", E)
+        G_si  = uconvert(u"Pa", G)
         Ix_si = uconvert(u"m^4", Ix)
         Iy_si = uconvert(u"m^4", Iy)
-        J_si = uconvert(u"m^4", J)
-        ρ_si = uconvert(u"kg/m^3", ρ)
-        
-        # Handle shear areas - convert or keep Inf
-        Ay_val = Ay isa Quantity ? ustrip(u"m^2", Ay) : Float64(Ay)
-        Az_val = Az isa Quantity ? ustrip(u"m^2", Az) : Float64(Az)
-        
-        return new(A_si, E_si, G_si, Ix_si, Iy_si, J_si, ρ_si, Ay_val, Az_val)
+        J_si  = uconvert(u"m^4", J)
+        ρ_si  = uconvert(u"kg/m^3", ρ)
+        Ay_si = Ay isa Quantity ? uconvert(u"m^2", Ay) : Ay * u"m^2"
+        Az_si = Az isa Quantity ? uconvert(u"m^2", Az) : Az * u"m^2"
+        return new(A_si, E_si, G_si, Ix_si, Iy_si, J_si, ρ_si, Ay_si, Az_si)
     end
 
     function Section(mat::Material, A::Quantity, Ix::Quantity, Iy::Quantity, J::Quantity;
-                     Ay::Union{Quantity, Real} = Inf, Az::Union{Quantity, Real} = Inf)
-        A_si = uconvert(u"m^2", A)
+                     Ay::Union{Quantity, Real} = Inf * u"m^2",
+                     Az::Union{Quantity, Real} = Inf * u"m^2")
+        A_si  = uconvert(u"m^2", A)
         Ix_si = uconvert(u"m^4", Ix)
         Iy_si = uconvert(u"m^4", Iy)
-        J_si = uconvert(u"m^4", J)
-        
-        Ay_val = Ay isa Quantity ? ustrip(u"m^2", Ay) : Float64(Ay)
-        Az_val = Az isa Quantity ? ustrip(u"m^2", Az) : Float64(Az)
-        
-        return new(A_si, mat.E, mat.G, Ix_si, Iy_si, J_si, mat.ρ, Ay_val, Az_val)
+        J_si  = uconvert(u"m^4", J)
+        Ay_si = Ay isa Quantity ? uconvert(u"m^2", Ay) : Ay * u"m^2"
+        Az_si = Az isa Quantity ? uconvert(u"m^2", Az) : Az * u"m^2"
+        return new(A_si, mat.E, mat.G, Ix_si, Iy_si, J_si, mat.ρ, Ay_si, Az_si)
     end
 end
 
@@ -103,9 +98,9 @@ is_bernoulli_euler(sec::Section) = !is_timoshenko(sec)
 A cross section assigned to a truss element.
 
 # Fields
-- `A` Area [Distance²]
+- `A` Area [L²]
 - `E` Modulus of Elasticity [Pressure]
-- `ρ` Density [Mass/Distance³]
+- `ρ` Density [M/L³]
 
 # Examples
 ```julia
@@ -113,10 +108,10 @@ TrussSection(0.01u"m^2", 200u"GPa", 7850u"kg/m^3")
 TrussSection(mat, 0.01u"m^2")
 ```
 """
-struct TrussSection <: AbstractSection
+struct TrussSection <: AbstractCrossSection
     A::Area                 # Area
-    E::QuantityPressure     # Young's modulus
-    ρ::QuantityDensity      # Density
+    E::Pressure             # Young's modulus
+    ρ::Density              # Density
 
     function TrussSection(
         A::Quantity,

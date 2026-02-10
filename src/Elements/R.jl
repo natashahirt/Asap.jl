@@ -1,4 +1,21 @@
 """
+    _build_R12(Λ::NTuple{9,Float64}) -> Matrix{Float64}
+
+Build the [12 × 12] block-diagonal rotation matrix from a flat 9-tuple
+representing the 3×3 direction cosine matrix Λ (row-major).
+Avoids 8 `zeros(3,…)` allocations from the old `[Λ zeros(3,9); …]` pattern.
+"""
+@inline function _build_R12(Λ::NTuple{9,Float64})
+    R = zeros(12, 12)
+    @inbounds for blk in (0, 3, 6, 9)          # four 3×3 blocks on the diagonal
+        R[blk+1, blk+1] = Λ[1]; R[blk+1, blk+2] = Λ[2]; R[blk+1, blk+3] = Λ[3]
+        R[blk+2, blk+1] = Λ[4]; R[blk+2, blk+2] = Λ[5]; R[blk+2, blk+3] = Λ[6]
+        R[blk+3, blk+1] = Λ[7]; R[blk+3, blk+2] = Λ[8]; R[blk+3, blk+3] = Λ[9]
+    end
+    return R
+end
+
+"""
     R(element::Element; tol = 1e-4)
 
 Get the [12 × 12] transformation matrix for a given element.
@@ -15,9 +32,9 @@ function R(element::Element; tol = 1e-4)
 
 
     if norm(cross(xvec, globalY)) < tol #special case for horizontal members aligned with global Y
-        Λ = [0. CYx 0.;
-            -CYx*cΨ 0 sΨ;
-            CYx*sΨ 0 cΨ]
+        Λ = (0., CYx, 0.,
+            -CYx*cΨ, 0., sΨ,
+            CYx*sΨ, 0., cΨ)
     else # all other
         b1 = (-CXx * CYx * cΨ - CZx * sΨ) / sqrt(CXx^2 + CZx^2)
         b2 = sqrt(CXx^2 + CZx^2) * cΨ
@@ -27,14 +44,12 @@ function R(element::Element; tol = 1e-4)
         c2 = -sqrt(CXx^2 + CZx^2) * sΨ
         c3 = (CYx * CZx * sΨ + CXx * cΨ) / sqrt(CXx^2 + CZx^2)
 
-        Λ = [CXx CYx CZx; 
-            b1 b2 b3; 
-            c1 c2 c3]
+        Λ = (CXx, CYx, CZx, 
+            b1, b2, b3, 
+            c1, c2, c3)
     end
     
-    R = [Λ zeros(3,9); zeros(3,3) Λ zeros(3,6); zeros(3,6) Λ zeros(3,3); zeros(3,9) Λ]
-
-    return R
+    return _build_R12(Λ)
 end
 
 function R!(element::Element; tol = 1e-6)
@@ -84,9 +99,9 @@ function R(xvec::Vector{Float64}, Ψ; tol = 1e-4)
 
 
     if norm(cross(xvec, globalY)) < tol #special case for horizontal members aligned with global Y
-        Λ = [0. CYx 0.;
-            -CYx*cΨ 0 sΨ;
-            CYx*sΨ 0 cΨ]
+        Λ = (0., CYx, 0.,
+            -CYx*cΨ, 0., sΨ,
+            CYx*sΨ, 0., cΨ)
     else # all other
         b1 = (-CXx * CYx * cΨ - CZx * sΨ) / sqrt(CXx^2 + CZx^2)
         b2 = sqrt(CXx^2 + CZx^2) * cΨ
@@ -96,14 +111,12 @@ function R(xvec::Vector{Float64}, Ψ; tol = 1e-4)
         c2 = -sqrt(CXx^2 + CZx^2) * sΨ
         c3 = (CYx * CZx * sΨ + CXx * cΨ) / sqrt(CXx^2 + CZx^2)
 
-        Λ = [CXx CYx CZx; 
-            b1 b2 b3; 
-            c1 c2 c3]
+        Λ = (CXx, CYx, CZx, 
+            b1, b2, b3, 
+            c1, c2, c3)
     end
     
-    R = [Λ zeros(3,9); zeros(3,3) Λ zeros(3,6); zeros(3,6) Λ zeros(3,3); zeros(3,9) Λ]
-
-    return R
+    return _build_R12(Λ)
 end
 
 """
