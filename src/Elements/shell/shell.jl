@@ -20,7 +20,7 @@ Original FinEtools implementation by Petr Krysl (FinEtoolsFlexStructures.jl)
 Adapted for Asap.jl with permission - MIT License
 =#
 
-using LinearAlgebra: norm, dot, cross, mul!, Transpose
+using LinearAlgebra: norm, dot, cross, mul!, lmul!
 
 # Inline mean to avoid Statistics dependency
 _mean(x) = sum(x) / length(x)
@@ -755,6 +755,75 @@ function bending_moments(elem::ShellTri3, u_global::Vector{Float64})
     Dps = _plane_stress_D(elem.E, elem.ν)
     M = (elem.thickness^3 / 12.0) * Dps * κ
     
+    return M
+end
+
+# =============================================================================
+# Zero-Allocation Bending Moments Workspace
+# =============================================================================
+
+"""
+Thread-local workspace for zero-allocation `bending_moments!` calls.
+Holds all temporary buffers needed to compute shell bending moments.
+"""
+struct ShellMomentWorkspace
+    u_elem::Vector{Float64}     # length 18
+    u_local::Vector{Float64}    # length 18
+    gradN_e::Matrix{Float64}    # 3×2
+    Bb::Matrix{Float64}         # 3×18
+    κ::Vector{Float64}          # length 3
+    Dps::Matrix{Float64}        # 3×3
+end
+
+function ShellMomentWorkspace()
+    ShellMomentWorkspace(
+        zeros(18), zeros(18), zeros(3, 2),
+        zeros(3, 18), zeros(3), zeros(3, 3)
+    )
+end
+
+const _MOMENT_WS = ShellMomentWorkspace[ShellMomentWorkspace() for _ in 1:Threads.nthreads()]
+
+"""Fill plane-stress D matrix in-place."""
+function _plane_stress_D!(D::Matrix{Float64}, E::Float64, ν::Float64)
+    c = E / (1.0 - ν^2)
+    D[1,1] = c;       D[1,2] = c*ν;     D[1,3] = 0.0
+    D[2,1] = c*ν;     D[2,2] = c;       D[2,3] = 0.0
+    D[3,1] = 0.0;     D[3,2] = 0.0;     D[3,3] = c*(1.0-ν)/2.0
+    return D
+end
+
+"""
+    bending_moments!(M, elem, u_global [, ws])
+
+Compute bending moments `[Mxx, Myy, Mxy]` in local coordinates,
+writing into the pre-allocated 3-vector `M`.  **Zero heap allocations.**
+"""
+function bending_moments!(M::AbstractVector{Float64}, elem::ShellTri3,
+                          u_global::Vector{Float64},
+                          ws::ShellMomentWorkspace = _MOMENT_WS[Threads.threadid()])
+    # Extract element DOFs
+    fill!(ws.u_elem, 0.0)
+    @inbounds for i in 1:3
+        base = (i - 1) * 6
+        node = elem.nodes[i]
+        for j in 1:6
+            ws.u_elem[base + j] = u_global[node.globalID[j]]
+        end
+    end
+
+    # Transform to local: u_local = R * u_elem
+    mul!(ws.u_local, elem.R, ws.u_elem)
+
+    # Curvature: κ = Bb * u_local
+    _compute_gradN_Ae!(ws.gradN_e, elem.ecoords_e)
+    _Bbmat!(ws.Bb, ws.gradN_e)
+    mul!(ws.κ, ws.Bb, ws.u_local)
+
+    # M = (t³/12) * Dps * κ
+    _plane_stress_D!(ws.Dps, elem.E, elem.ν)
+    mul!(M, ws.Dps, ws.κ)
+    lmul!(elem.thickness^3 / 12.0, M)
     return M
 end
 

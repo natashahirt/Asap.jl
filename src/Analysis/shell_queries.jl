@@ -225,6 +225,17 @@ function bending_moments(elem::ShellTri3, model::AbstractModel)
 end
 
 """
+    bending_moments!(M, elem, model [, ws])
+
+Zero-allocation convenience: compute bending moments into pre-allocated `M`.
+"""
+function bending_moments!(M::AbstractVector{Float64}, elem::ShellTri3, model::AbstractModel,
+                          ws::ShellMomentWorkspace = _MOMENT_WS[Threads.threadid()])
+    @assert model.processed "Model must be solved first (call solve!)"
+    return bending_moments!(M, elem, model.u, ws)
+end
+
+"""
     bending_moments(model::Model, pt::Tuple{T,T}; tol=1e-6) -> Union{Vector{Float64}, Nothing}
 
 Query bending moments at a single point.
@@ -245,12 +256,23 @@ function bending_moments(model::AbstractModel, pt::Tuple{T,T}; tol::Float64=1e-6
     
     if isempty(tris)
         return nothing
-    elseif length(tris) == 1
-        return bending_moments(tris[1], model.u)
+    end
+
+    ws = ShellMomentWorkspace()
+    M = Vector{Float64}(undef, 3)
+    if length(tris) == 1
+        bending_moments!(M, tris[1], model.u, ws)
+        return M
     else
-        # Average moments from all touching elements
-        moments = [bending_moments(t, model.u) for t in tris]
-        return [sum(m[i] for m in moments) / length(moments) for i in 1:3]
+        fill!(M, 0.0)
+        tmp = Vector{Float64}(undef, 3)
+        for t in tris
+            bending_moments!(tmp, t, model.u, ws)
+            @inbounds for i in 1:3; M[i] += tmp[i]; end
+        end
+        n = length(tris)
+        @inbounds for i in 1:3; M[i] /= n; end
+        return M
     end
 end
 
@@ -333,7 +355,16 @@ function bending_moments(elems::Vector{<:ShellElement}, model::AbstractModel;
     
     # If neither polygon nor pts is specified, return moments for all elements
     if isnothing(polygon) && isnothing(pts)
-        return [bending_moments(e, model.u) for e in elems if e isa ShellTri3]
+        ws = ShellMomentWorkspace()
+        M_buf = Vector{Float64}(undef, 3)
+        result = Vector{Vector{Float64}}()
+        sizehint!(result, length(elems))
+        for e in elems
+            e isa ShellTri3 || continue
+            bending_moments!(M_buf, e, model.u, ws)
+            push!(result, copy(M_buf))
+        end
+        return result
     end
     
     @assert !isnothing(polygon) ⊻ !isnothing(pts) "Specify at most one of polygon= or pts="
@@ -367,12 +398,14 @@ function _integrate_bending_moments(shells::Vector{<:ShellElement},
         )
     end
     
+    ws = ShellMomentWorkspace()
+    M = Vector{Float64}(undef, 3)
     Mxx_total, Myy_total, Mxy_total = 0.0, 0.0, 0.0
     Mxx_max, Myy_max, Mxy_max = -Inf, -Inf, -Inf
     area_total = 0.0
     
     for tri in tris
-        M = bending_moments(tri, u)  # [Mxx, Myy, Mxy] in N·m/m
+        bending_moments!(M, tri, u, ws)  # [Mxx, Myy, Mxy] in N·m/m — zero alloc
         A = tri.area  # m²
         
         # Weighted accumulation (M is moment per unit width, M*A = total moment over element)
@@ -411,10 +444,22 @@ function _query_moments_at_point(shells::Vector{<:ShellElement}, u::Vector{Float
     
     if isempty(tris)
         return nothing
-    elseif length(tris) == 1
-        return bending_moments(tris[1], u)
+    end
+
+    ws = ShellMomentWorkspace()
+    M = Vector{Float64}(undef, 3)
+    if length(tris) == 1
+        bending_moments!(M, tris[1], u, ws)
+        return M
     else
-        moments = [bending_moments(t, u) for t in tris]
-        return [sum(m[i] for m in moments) / length(moments) for i in 1:3]
+        fill!(M, 0.0)
+        tmp = Vector{Float64}(undef, 3)
+        for t in tris
+            bending_moments!(tmp, t, u, ws)
+            @inbounds for i in 1:3; M[i] += tmp[i]; end
+        end
+        n = length(tris)
+        @inbounds for i in 1:3; M[i] /= n; end
+        return M
     end
 end

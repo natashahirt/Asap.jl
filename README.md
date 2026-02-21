@@ -18,12 +18,15 @@ This is an extended fork of the [original Asap.jl](https://github.com/keithjlee/
 **New in this fork:**
 
 - **Shell elements** - Triangular shell elements with membrane + bending (based on FinEtools)
+- **Shell patches** - Stiffened regions within shell meshes (drop panels, column capitals)
 - **Composite shells** - Laminated composite materials with ply-level stress recovery
 - **Grounded springs** - Elastic foundation/support modeling
 - **Modal analysis** - Natural frequencies and mode shapes
 - **Nonlinear analysis** - P-delta, linear buckling (frames + shells), Newton-Raphson pushover
 - **Unified solve! API** - Single entry point with symbol dispatch: `solve!(model, :buckling)`
+- **Multi-case solve** - Solve multiple load cases with a single K factorization
 - **Mixed models** - Combined frame + shell structures in one model
+- **Tributary loads** - Piecewise-linear tributary distribution for frame elements
 - **Tributary areas** - Straight skeleton and Voronoi algorithms for load distribution
 - **Area loads** - Unified surface pressure API for shells
 - **Shell queries** - Spatial queries and region integration for design strips
@@ -552,6 +555,42 @@ solve!(model)
 
 The interior support creates pinned nodes along the beam line, producing correct two-span moment distribution (hogging moment over support, reduced span moments).
 
+#### Shell Patches (Stiffened Regions)
+
+`ShellPatch` defines a region within a shell mesh that receives a different `ShellSection` — typically thicker. Useful for column drop panels, capital regions, or any locally stiffened zone.
+
+The patch polygon becomes constrained edges in the triangulation, ensuring element boundaries align with the patch boundary. Triangles whose centroids fall inside the polygon receive the patch section.
+
+```julia
+# Define a thicker section for the drop panel
+drop_section = ShellSection(0.30u"m", 30u"GPa", 0.2; ρ=2400u"kg/m^3")
+
+# From center + dimensions (rectangular shorthand)
+patch = ShellPatch(3.0u"m", 3.0u"m", 1.0u"m", 1.0u"m", drop_section)
+
+# From a Meshes.jl polygon (any shape)
+using Meshes
+patch = ShellPatch(
+    Quadrangle(Point(2.5, 2.5), Point(3.5, 2.5),
+               Point(3.5, 3.5), Point(2.5, 3.5)),
+    drop_section
+)
+
+# Use with Shell() via interior_patches keyword
+shells = Shell(corners, slab_section; interior_patches=[patch])
+```
+
+Multiple patches per slab are supported:
+
+```julia
+# Drop panels at multiple column locations
+patches = [
+    ShellPatch(3.0u"m", 3.0u"m", 1.0u"m", 1.0u"m", drop_section),
+    ShellPatch(9.0u"m", 3.0u"m", 1.0u"m", 1.0u"m", drop_section),
+]
+shells = Shell(corners, slab_section; interior_patches=patches)
+```
+
 ### `mesh()` - Just Triangulation
 
 If you want to control meshing separately:
@@ -858,6 +897,39 @@ load = AreaLoad(shells, 5.0u"kPa";
 load = AreaLoad(shells, 5.0u"kPa"; distribute_to=beams, axis=(1.0, 0.0))
 ```
 
+## `GravityLoad`
+
+Self-weight for frame elements. Computes `w = ρ × A × g` as a distributed load in the global -Z direction.
+
+```julia
+load = GravityLoad(element, 9.81u"m/s^2")
+load = GravityLoad(element, 9.81u"m/s^2", :column_sw)  # with ID
+```
+
+## `TributaryLoad`
+
+Piecewise-linear distributed load from tributary geometry. Defines a load intensity profile along a beam via breakpoint positions and tributary widths, combined with a uniform pressure.
+
+```julia
+# Positions in [0, 1] along element, widths at each position
+load = TributaryLoad(element, 
+    [0.0, 0.25, 0.5, 0.75, 1.0],      # positions (normalized)
+    [0.0, 1.5, 2.0, 1.5, 0.0]u"m",    # tributary widths
+    5.0u"kPa"                           # pressure
+)
+
+# Custom direction (default is gravity: (0,0,-1))
+load = TributaryLoad(element, positions, widths, pressure, (0.0, 0.0, -1.0))
+```
+
+The `pressure` field is **mutable** — update it and re-solve to change load magnitude without rebuilding tributary geometry:
+
+```julia
+load.pressure = 7.5u"kPa"  # Update in-place
+```
+
+Line load intensity at each breakpoint is `width × pressure` (N/m).
+
 ## `SelfWeight`
 
 Automatic self-weight from shell properties (`p = ρ × t × g`).
@@ -1017,12 +1089,48 @@ node.displacement  # [Tx, Ty, Tz, Rx, Ry, Rz] with units
 node.reaction      # [Fx, Fy, Fz, Mx, My, Mz] with units
 element.forces     # Local end forces
 
-# Re-solve with new loads
+# Re-solve with new loads (mutating — replaces model loads)
 solve!(model, new_loads)
 
 # After modifying geometry
 solve!(model; reprocess=true)
 ```
+
+### Non-Mutating Solve
+
+Return a displacement vector without modifying the model. Reuses the cached
+stiffness factorization, so repeated calls are cheap (back-substitution only).
+
+```julia
+u = solve(model, loads)   # Returns Vector{Float64}, model unchanged
+```
+
+### Multi-Case Solve
+
+Solve multiple load cases against the same stiffness matrix. Uses a single
+factorization and a multi-RHS LAPACK solve for maximum efficiency. Ideal for
+pattern loading, load combination envelopes, or parametric studies.
+
+```julia
+cases = [dead_loads, dead_plus_live, dead_plus_wind]
+u_cases = solve(model, cases)   # Returns Vector{Vector{Float64}}
+
+# Post-process each case independently (no model mutation)
+for (u, loads) in zip(u_cases, cases)
+    el_loads = get_elemental_loads(loads, model.nFrameElements)
+    for element in model.frame_elements
+        forces = ElementInternalForces(
+            element, u[element.globalID],
+            el_loads[element.elementID], 0.1,
+            etype2DOF[typeof(element)]
+        )
+        # ... envelope logic ...
+    end
+end
+```
+
+Dispatch is automatic — pass a `Vector{<:AbstractLoad}` for a single case,
+or a `Vector{<:Vector{<:AbstractLoad}}` for multiple cases.
 
 ## Modal Analysis
 
@@ -1199,9 +1307,48 @@ forces = ElementInternalForces(element, model)
 # At any position along element (0 to 1)
 Vy = forces.Vy(0.5)   # Shear at midspan
 Mz = forces.Mz(0.5)   # Moment at midspan
+```
 
-# Envelopes for multiple load cases
-envelopes = load_envelopes(element, [model1, model2, model3])
+### From Explicit Loads (No Model Required)
+
+For multi-case or pattern loading workflows where you have a displacement vector
+and load set but don't want to mutate the model:
+
+```julia
+# Build per-element load map from an arbitrary load vector
+el_loads = get_elemental_loads(loads, n_elements)
+
+# Compute forces from explicit displacement + loads (no model state needed)
+forces = ElementInternalForces(element, loads; resolution=20)
+
+# Or with explicit displacement vector + load list + increment
+forces = ElementInternalForces(element, u[element.globalID],
+    el_loads[element.elementID], 0.1, etype2DOF[typeof(element)])
+```
+
+### Combined Forces + Displacements
+
+`ElementForceAndDisplacement` computes both in a single pass, sharing the load
+iteration loop to avoid duplicate work:
+
+```julia
+fd = ElementForceAndDisplacement(element, loads; resolution=20)
+fd.forces       # ElementInternalForces
+fd.displacements  # ElementDisplacements
+```
+
+### Force Envelopes
+
+Compute high/low envelopes across multiple load cases:
+
+```julia
+envelopes = load_envelopes(model, [loads_case1, loads_case2, loads_case3], 0.1)
+
+for env in envelopes
+    env.Myhigh  # Maximum moment along element
+    env.Mylow   # Minimum moment along element
+    env.Vyhigh  # Maximum shear
+end
 ```
 
 ## Shell Internal Forces

@@ -136,7 +136,7 @@ export DiaphragmSection
 export RigidDiaphragm
 export Diaphragm
 export stress
-export bending_moments
+export bending_moments, bending_moments!, ShellMomentWorkspace
 export membrane_forces
 export ply_stresses
 export release!
@@ -222,10 +222,10 @@ include("Model/bridgeprocessing.jl")
 include("Model/postprocessing.jl")
 include("Model/analysis.jl")
 export process!
+export update!
 export solve!
 export solve
 export factorize!, clear_factorization!
-export _reprocess_stiffness_and_loads!
 export ANALYSIS_TYPES
 export available_analyses
 export supports_analysis
@@ -289,12 +289,13 @@ export planarDOFs
 export groupbyid
 export ElementInternalForces, ElementForceAndDisplacement, ElementProps
 export ForceEnvelopes
+export moments!, shears!
 export load_envelopes
 export get_elemental_loads, clear_elemental_loads!
 export ElementDisplacements
 export displacements
 # Shell internal forces
-export ShellInternalForces
+export ShellInternalForces, ShellForcesWorkspace
 export principal_moments
 export principal_forces
 export von_mises_stress

@@ -80,9 +80,8 @@ nodePositions(model::AbstractModel) = node_positions(model)
 Update the free/fixed degrees of freedom for a model
 """
 function update_DOF!(model::AbstractModel)
-    model.DOFs = vcat(getproperty.(model.nodes, :dof)...)
-    model.freeDOFs = findall(model.DOFs)
-    model.fixedDOFs = findall(.!model.DOFs)
+    n_dof_per_node = model isa TrussModel ? 3 : 6
+    _populate_DOFs_flat!(model, length(model.nodes), n_dof_per_node)
 end
 
 export updateDOF!

@@ -166,7 +166,7 @@ function solve!(model::FrameModel; reprocess = false, postprocess::Symbol = :all
     fact = _get_factorization(model)
     U = fact \ F
 
-    model.compliance = U' * F
+    model.compliance = dot(U, F)
     if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
@@ -185,10 +185,11 @@ function solve!(model::ShellModel; reprocess = false, postprocess::Symbol = :all
     end
 
     idx = model.freeDOFs
+    P_free = @view model.P[idx]
     fact = _get_factorization(model)
-    U = fact \ model.P[idx]
+    U = fact \ P_free
 
-    model.compliance = U' * model.P[idx]
+    model.compliance = dot(U, P_free)
     if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
@@ -217,7 +218,7 @@ function solve!(model::Model; reprocess = false, postprocess::Symbol = :all)
     fact = _get_factorization(model)
     U = fact \ F
 
-    model.compliance = U' * F
+    model.compliance = dot(U, F)
     if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
@@ -236,10 +237,11 @@ function solve!(model::TrussModel; reprocess = false, postprocess::Symbol = :all
     end
 
     idx = model.freeDOFs
+    P_free = @view model.P[idx]
     fact = _get_factorization(model)
-    U = fact \ model.P[idx]
+    U = fact \ P_free
 
-    model.compliance = U' * model.P[idx]
+    model.compliance = dot(U, P_free)
     if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
@@ -253,37 +255,105 @@ end
 """
     solve(model::FrameModel, L::Vector{AbstractLoad})
 
-Return the displacement vector under a given load set L.
+Return the displacement vector under a given load set `L`, reusing the cached
+stiffness factorization.
 """
 function solve(model::FrameModel, L::Vector{<:AbstractLoad})
     model.processed || process!(model)
     
     F = create_F(model, L)
     idx = model.freeDOFs
-    U = model.S[idx, idx] \ F[idx]
-
+    fact = _get_factorization(model)
+    
     u = zeros(model.nDOFs)
-    u[idx] = U
-
+    u[idx] = fact \ F[idx]
     return u
 end
 
 """
     solve(model::Model, L::Vector{AbstractLoad})
 
-Return the displacement vector under a given load set L.
+Return the displacement vector under a given load set `L`, reusing the cached
+stiffness factorization.
 """
 function solve(model::Model, L::Vector{<:AbstractLoad})
     model.processed || process!(model)
     
     F = create_F(model, L)
     idx = model.freeDOFs
-    U = model.S[idx, idx] \ F[idx]
-
+    fact = _get_factorization(model)
+    
     u = zeros(model.nDOFs)
-    u[idx] = U
-
+    u[idx] = fact \ F[idx]
     return u
+end
+
+"""
+    solve(model::FrameModel, cases::Vector{<:Vector{<:AbstractLoad}})
+
+Solve multiple load cases against the same stiffness matrix. Returns a vector
+of displacement vectors, one per case. Uses a single factorization and a
+multi-RHS LAPACK solve for efficiency.
+"""
+function solve(model::FrameModel, cases::Vector{<:Vector{<:AbstractLoad}})
+    model.processed || process!(model)
+    fact = _get_factorization(model)
+    idx = model.freeDOFs
+    n = model.nDOFs
+    ncases = length(cases)
+
+    # Build force matrix — each column is a load case
+    F = Matrix{Float64}(undef, length(idx), ncases)
+    for (j, loads) in enumerate(cases)
+        Fj = create_F(model, loads)
+        F[:, j] = Fj[idx]
+    end
+
+    # Multi-RHS solve (LAPACK level-3 BLAS)
+    U = fact \ F
+
+    # Unpack into full DOF vectors
+    results = Vector{Vector{Float64}}(undef, ncases)
+    for j in 1:ncases
+        u = zeros(n)
+        u[idx] = @view U[:, j]
+        results[j] = u
+    end
+    return results
+end
+
+"""
+    solve(model::Model, cases::Vector{<:Vector{<:AbstractLoad}})
+
+Solve multiple load cases against the same stiffness matrix. Returns a vector
+of displacement vectors, one per case. Uses a single factorization and a
+multi-RHS LAPACK solve for efficiency.
+"""
+function solve(model::Model, cases::Vector{<:Vector{<:AbstractLoad}})
+    model.processed || process!(model)
+    fact = _get_factorization(model)
+    idx = model.freeDOFs
+    n = model.nDOFs
+    ncases = length(cases)
+
+    # Build force matrix — each column is a load case
+    F = Matrix{Float64}(undef, length(idx), ncases)
+    for (j, loads) in enumerate(cases)
+        Fj = create_F(model, loads)
+        F[:, j] = Fj[idx]
+    end
+
+    # Multi-RHS solve (LAPACK level-3 BLAS)
+    U = fact \ F
+
+    # Unpack into full DOF vectors
+    results = Vector{Vector{Float64}}(undef, ncases)
+    for j in 1:ncases
+        u = zeros(n)
+        u[idx] = @view U[:, j]
+        results[j] = u
+    end
+    return results
 end
 
 """
@@ -315,18 +385,18 @@ end
 """
     solve(model::TrussModel, L::Vector{NodeForce})
 
-Return the displacement vector under a given load set L.
+Return the displacement vector under a given load set `L`, reusing the cached
+stiffness factorization.
 """
 function solve(model::TrussModel, L::Vector{NodeForce})
     model.processed || process!(model)
     
     F = create_F(model, L)
     idx = model.freeDOFs
-    U = model.S[idx, idx] \ F[idx]
-
+    fact = _get_factorization(model)
+    
     u = zeros(model.nDOFs)
-    u[idx] = U
-
+    u[idx] = fact \ F[idx]
     return u
 end
 
@@ -512,7 +582,7 @@ function _solve_static!(model::FrameModel; reprocess=false, postprocess::Symbol=
     fact = _get_factorization(model)
     U = fact \ F
 
-    model.compliance = U' * F
+    model.compliance = dot(U, F)
     if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
@@ -526,10 +596,11 @@ function _solve_static!(model::ShellModel; reprocess=false, postprocess::Symbol=
     end
 
     idx = model.freeDOFs
+    P_free = @view model.P[idx]
     fact = _get_factorization(model)
-    U = fact \ model.P[idx]
+    U = fact \ P_free
 
-    model.compliance = U' * model.P[idx]
+    model.compliance = dot(U, P_free)
     if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
@@ -552,7 +623,7 @@ function _solve_static!(model::Model; reprocess=false, postprocess::Symbol=:all)
     fact = _get_factorization(model)
     U = fact \ F
 
-    model.compliance = U' * F
+    model.compliance = dot(U, F)
     if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
@@ -566,10 +637,11 @@ function _solve_static!(model::TrussModel; reprocess=false, postprocess::Symbol=
     end
 
     idx = model.freeDOFs
+    P_free = @view model.P[idx]
     fact = _get_factorization(model)
-    U = fact \ model.P[idx]
+    U = fact \ P_free
 
-    model.compliance = U' * model.P[idx]
+    model.compliance = dot(U, P_free)
     if length(model.u) == model.nDOFs; fill!(model.u, 0.0) else model.u = zeros(model.nDOFs) end
     model.u[idx] = U
 
@@ -597,43 +669,188 @@ function _solve_nonlinear!(model; n_steps::Int=10, max_iter::Int=20, tol::Float6
 end
 
 # =============================================================================
-# Light Reprocessing (topology unchanged, only sections/loads changed)
+# update!  —  public API for property/load changes (topology unchanged)
 # =============================================================================
 
 """
-    _reprocess_stiffness_and_loads!(model)
+    update!(model; values_only=false)
 
-Lightweight reprocessing when only section properties and loads have changed
-but the model topology (nodes, elements, connectivity) is unchanged.
+Rebuild element stiffness matrices, load vector, and global stiffness
+matrix after property or load changes.  Topology must be unchanged
+(same nodes, elements, DOFs) — use `process!` after topology changes.
 
-Skips `make_ids!` and `populate_DOF_indices!` (which are topology-dependent),
-only re-computing element stiffnesses, load vectors, and the global stiffness
-matrix.  Used by the EFM cached path to avoid redundant work.
+# Keyword arguments
+- `values_only=false` (default): full property update — recomputes element
+  geometry (LCS, R, length), stiffness K, loads P, and reassembles S from
+  COO triplets.  Use after node positions moved or section connectivity
+  changed.
+
+- `values_only=true`: lightweight update — only recomputes element K
+  matrices from current section/material properties and rebuilds P.
+  Updates S values **in-place** (same sparsity pattern, avoids COO →
+  sparse reconstruction).  Use when only E, t, ν, I, A, or load
+  magnitudes changed but geometry is unchanged.
 """
-function _reprocess_stiffness_and_loads!(model::FrameModel)
+function update!(model::FrameModel; values_only::Bool = false, loads_only::Bool = false)
     for element in model.elements
-        if element isa Element
-            fill!(element.Q, 0.0)
-        end
+        element isa Element && fill!(element.Q, 0.0)
     end
-    process_elements!(model)
-    populate_loads!(model)
-    create_S!(model)
-    model._factorization = nothing
+
+    if loads_only
+        # Only load magnitudes changed — K and S untouched, keep factorization
+        populate_loads!(model)
+    elseif values_only
+        # K-only pass: skip lcs!, R!, length! — geometry unchanged
+        for element in model.elements
+            global_K!(element)
+        end
+        populate_loads!(model)
+        _update_S_values!(model)
+        model._factorization = nothing
+    else
+        # Full element reprocess + S rebuild
+        process_elements!(model)
+        populate_loads!(model)
+        create_S!(model)
+        model._factorization = nothing
+    end
+
     model._elemental_loads = nothing
     model.processed = true
 end
 
-function _reprocess_stiffness_and_loads!(model::Model)
+function update!(model::Model; values_only::Bool = false, loads_only::Bool = false)
     for element in model.frame_elements
-        if element isa Element
-            fill!(element.Q, 0.0)
-        end
+        element isa Element && fill!(element.Q, 0.0)
     end
-    process_elements!(model)
-    populate_loads!(model)
-    create_S!(model)
-    model._factorization = nothing
+
+    if loads_only
+        # Only load magnitudes changed — K and S untouched, keep factorization
+        populate_loads!(model)
+    elseif values_only
+        # K-only pass: skip geometry — reuse existing LCS, R, length, area
+        for element in model.frame_elements
+            global_K!(element)
+        end
+        for elem in model.shell_elements
+            global_K!(elem)
+        end
+        populate_loads!(model)
+        _update_S_values!(model)
+        model._factorization = nothing
+    else
+        # Full element reprocess + S rebuild
+        process_elements!(model)
+        populate_loads!(model)
+        create_S!(model)
+        model._factorization = nothing
+    end
+
     model._elemental_loads = nothing
     model.processed = true
+end
+
+function update!(model::ShellModel; values_only::Bool = false, loads_only::Bool = false)
+    if loads_only
+        # Only load magnitudes changed — K and S untouched, keep factorization
+        populate_loads!(model)
+    elseif values_only
+        for elem in model.elements
+            global_K!(elem)
+        end
+        populate_loads!(model)
+        _update_S_values!(model)
+        model._factorization = nothing
+    else
+        process_elements!(model)
+        populate_loads!(model)
+        create_S!(model)
+        model._factorization = nothing
+    end
+
+    model.processed = true
+end
+
+function update!(model::TrussModel; values_only::Bool = false, loads_only::Bool = false)
+    if loads_only
+        # Only load magnitudes changed — K and S untouched, keep factorization
+        populate_loads!(model)
+    elseif values_only
+        for element in model.elements
+            global_K!(element)
+        end
+        populate_loads!(model)
+        _update_S_values!(model)
+        model._factorization = nothing
+    else
+        process_elements!(model)
+        populate_loads!(model)
+        create_S!(model)
+        model._factorization = nothing
+    end
+
+    model.processed = true
+end
+
+
+# =============================================================================
+# _update_S_values!  —  in-place stiffness scatter (same sparsity pattern)
+# =============================================================================
+
+"""
+    _update_S_values!(model)
+
+Zero the existing sparse matrix `model.S` and scatter updated element K
+values back into it.  Reuses the CSC sparsity pattern from the initial
+`create_S!` call — avoids COO allocation + `sparse()` reconstruction.
+"""
+function _update_S_values!(model::FrameModel)
+    fill!(model.S.nzval, 0.0)
+    for element in model.elements
+        idx = element.globalID
+        n = length(idx)
+        @inbounds for i in 1:n, j in 1:n
+            model.S[idx[i], idx[j]] += element.K[i, j]
+        end
+    end
+end
+
+function _update_S_values!(model::ShellModel)
+    fill!(model.S.nzval, 0.0)
+    for element in model.elements
+        idx = element.globalID
+        n = length(idx)
+        @inbounds for i in 1:n, j in 1:n
+            model.S[idx[i], idx[j]] += element.K[i, j]
+        end
+    end
+end
+
+function _update_S_values!(model::TrussModel)
+    fill!(model.S.nzval, 0.0)
+    for element in model.elements
+        idx = element.globalID
+        n = length(idx)
+        @inbounds for i in 1:n, j in 1:n
+            model.S[idx[i], idx[j]] += element.K[i, j]
+        end
+    end
+end
+
+function _update_S_values!(model::Model)
+    fill!(model.S.nzval, 0.0)
+    for element in model.frame_elements
+        idx = element.globalID
+        n = length(idx)
+        @inbounds for i in 1:n, j in 1:n
+            model.S[idx[i], idx[j]] += element.K[i, j]
+        end
+    end
+    for element in model.shell_elements
+        idx = element.globalID
+        n = length(idx)
+        @inbounds for i in 1:n, j in 1:n
+            model.S[idx[i], idx[j]] += element.K[i, j]
+        end
+    end
 end

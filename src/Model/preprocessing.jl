@@ -1,6 +1,27 @@
+# Thread-local buffer for populate_load! (avoids R' * q allocation per load)
+const _POPULATE_LOAD_BUF = [zeros(12) for _ in 1:Threads.nthreads()]
+
 # =============================================================================
 # DOF Index Population
 # =============================================================================
+
+"""Populate model.DOFs as a flat Bool vector from node.dof — zero extra allocation."""
+function _populate_DOFs_flat!(model, n_nodes::Int, n_dof_per_node::Int)
+    total = n_nodes * n_dof_per_node
+    DOFs = Vector{Bool}(undef, total)
+    @inbounds for (i, node) in enumerate(model.nodes)
+        base = (i - 1) * n_dof_per_node
+        dofs = node.dof
+        for j in 1:n_dof_per_node
+            DOFs[base + j] = dofs[j]
+        end
+    end
+    model.DOFs = DOFs
+    model.nDOFs = total
+    model.nNodes = n_nodes
+    model.freeDOFs = findall(DOFs)
+    model.fixedDOFs = findall(.!DOFs)
+end
 
 """
     populate_DOF_indices!(model::FrameModel)
@@ -8,18 +29,14 @@
 Populate all indices, references, and other information in a frame model.
 """
 function populate_DOF_indices!(model::FrameModel)
-    model.DOFs = vcat(getproperty.(model.nodes, :dof)...)
-    model.nDOFs = length(model.DOFs)
-    model.nNodes = length(model.nodes)
-    model.nElements = length(model.elements)
-    model.freeDOFs = findall(model.DOFs)
-    model.fixedDOFs = findall(.!model.DOFs)
-
     n_dof = 6
-    dofset = collect(0:n_dof - 1)
+    nn = length(model.nodes)
+    _populate_DOFs_flat!(model, nn, n_dof)
+    model.nElements = length(model.elements)
 
     for (i, node) in enumerate(model.nodes)
-        node.globalID = i * n_dof - (n_dof - 1) .+ dofset
+        base = (i - 1) * n_dof
+        node.globalID = [base + 1, base + 2, base + 3, base + 4, base + 5, base + 6]
     end
 
     for element in model.elements
@@ -33,21 +50,16 @@ end
 Populate all indices, references, and other information in a shell model.
 """
 function populate_DOF_indices!(model::ShellModel)
-    model.DOFs = vcat(getproperty.(model.nodes, :dof)...)
-    model.nDOFs = length(model.DOFs)
-    model.nNodes = length(model.nodes)
-    model.nElements = length(model.elements)
-    model.freeDOFs = findall(model.DOFs)
-    model.fixedDOFs = findall(.!model.DOFs)
-
     n_dof = 6
-    dofset = collect(0:n_dof - 1)
+    nn = length(model.nodes)
+    _populate_DOFs_flat!(model, nn, n_dof)
+    model.nElements = length(model.elements)
 
     for (i, node) in enumerate(model.nodes)
-        node.globalID = i * n_dof - (n_dof - 1) .+ dofset
+        base = (i - 1) * n_dof
+        node.globalID = [base + 1, base + 2, base + 3, base + 4, base + 5, base + 6]
     end
 
-    # Populate globalID for shell elements
     for element in model.elements
         populate_globalID!(element)
     end
@@ -59,26 +71,19 @@ end
 Populate all indices, references, and other information in a unified model.
 """
 function populate_DOF_indices!(model::Model)
-    model.DOFs = vcat(getproperty.(model.nodes, :dof)...)
-    model.nDOFs = length(model.DOFs)
-    model.nNodes = length(model.nodes)
-    model.freeDOFs = findall(model.DOFs)
-    model.fixedDOFs = findall(.!model.DOFs)
-
     n_dof = 6
-    dofset = collect(0:n_dof - 1)
+    nn = length(model.nodes)
+    _populate_DOFs_flat!(model, nn, n_dof)
 
-    # Assign global DOFs to nodes
     for (i, node) in enumerate(model.nodes)
-        node.globalID = i * n_dof - (n_dof - 1) .+ dofset
+        base = (i - 1) * n_dof
+        node.globalID = [base + 1, base + 2, base + 3, base + 4, base + 5, base + 6]
     end
 
-    # Assign globalID to frame elements
     for element in model.frame_elements
         element.globalID = [element.nodeStart.globalID; element.nodeEnd.globalID]
     end
 
-    # Assign globalID to shell elements
     for element in model.shell_elements
         populate_globalID!(element)
     end
@@ -90,16 +95,14 @@ end
 Populate all indices, references, and other information in a truss model.
 """
 function populate_DOF_indices!(model::TrussModel)
-    model.DOFs = vcat(getproperty.(model.nodes, :dof)...)
-    model.nDOFs = length(model.DOFs)
-    model.nNodes = length(model.nodes)
-    model.nElements = length(model.elements)
-    model.freeDOFs = findall(model.DOFs)
-    model.fixedDOFs = findall(.!model.DOFs)
-
     n_dof = 3
+    nn = length(model.nodes)
+    _populate_DOFs_flat!(model, nn, n_dof)
+    model.nElements = length(model.elements)
+
     for (i, node) in enumerate(model.nodes)
-        node.globalID = i * n_dof - (n_dof - 1) .+ collect(0:n_dof - 1)
+        base = (i - 1) * n_dof
+        node.globalID = [base + 1, base + 2, base + 3]
     end
 
     for element in model.elements
@@ -258,9 +261,13 @@ Generate the fixed-end force vector `Q` for a given load, and populate the globa
 """
 function populate_load!(model::FrameModel, load::ElementLoad)
     idx = load.element.globalID
-    fixed_end_forces_GCS = load.element.R' * q(load)
-    load.element.Q += fixed_end_forces_GCS
-    model.Pf[idx] += fixed_end_forces_GCS
+    q_local = q(load)
+    buf = _POPULATE_LOAD_BUF[Threads.threadid()]
+    mul!(buf, transpose(load.element.R), q_local)
+    @inbounds for i in eachindex(idx)
+        load.element.Q[i] += buf[i]
+        model.Pf[idx[i]] += buf[i]
+    end
 end
 
 """
@@ -270,9 +277,13 @@ Generate the fixed-end force vector for a given load in a unified model.
 """
 function populate_load!(model::Model, load::ElementLoad)
     idx = load.element.globalID
-    fixed_end_forces_GCS = load.element.R' * q(load)
-    load.element.Q += fixed_end_forces_GCS
-    model.Pf[idx] += fixed_end_forces_GCS
+    q_local = q(load)
+    buf = _POPULATE_LOAD_BUF[Threads.threadid()]
+    mul!(buf, transpose(load.element.R), q_local)
+    @inbounds for i in eachindex(idx)
+        load.element.Q[i] += buf[i]
+        model.Pf[idx[i]] += buf[i]
+    end
 end
 
 """
@@ -282,7 +293,12 @@ Populate an external fixed-end force vector Pf with respect to an elemental load
 """
 function populate_load!(Pf::Vector{Float64}, load::ElementLoad)
     idx = load.element.globalID
-    Pf[idx] += load.element.R' * q(load)
+    q_local = q(load)
+    buf = _POPULATE_LOAD_BUF[Threads.threadid()]
+    mul!(buf, transpose(load.element.R), q_local)
+    @inbounds for i in eachindex(idx)
+        Pf[idx[i]] += buf[i]
+    end
 end
 
 """
@@ -296,15 +312,21 @@ Behavior depends on `load.distribute_to`:
 """
 function populate_load!(model::AbstractModel, load::AreaLoad)
     if load.distribute_to == :nodes
-        # FEM approach: nodal forces on shell nodes
-        for (node, fvec) in nodal_forces(load)
-            idx = node.globalID[1:3]  # Translation DOFs
-            model.P[idx] .+= fvec
+        # FEM approach: inline nodal forces — zero allocations
+        p = ustrip(u"Pa", load.pressure)
+        d1, d2, d3 = load.direction
+        @inbounds for shell in load.shells
+            fpn = p * shell.area / length(shell.nodes)
+            for node in shell.nodes
+                gid = node.globalID
+                model.P[gid[1]] += fpn * d1
+                model.P[gid[2]] += fpn * d2
+                model.P[gid[3]] += fpn * d3
+            end
         end
     else
-        # Tributary approach: compute and apply tributary loads to beams
+        # Tributary approach: geometry cached, only pressure updated
         if isnothing(load._tributary_loads)
-            # Compute tributary loads (lazy evaluation)
             axis_vec = isnothing(load.axis) ? nothing : [load.axis[1], load.axis[2]]
             load._tributary_loads = _shell_to_tributary_loads(
                 load.shells, 
@@ -314,6 +336,11 @@ function populate_load!(model::AbstractModel, load::AreaLoad)
                 direction=load.direction,
                 interior_beams=load.interior_beams
             )
+        else
+            # Geometry unchanged — just update pressure on cached loads
+            for trib_load in load._tributary_loads
+                trib_load.pressure = load.pressure
+            end
         end
         
         # Apply each tributary load
@@ -331,8 +358,10 @@ Populate an external load vector with area load contributions.
 function populate_load!(P::Vector{Float64}, load::AreaLoad)
     if load.distribute_to == :nodes
         for (node, fvec) in nodal_forces(load)
-            idx = node.globalID[1:3]
-            P[idx] .+= fvec
+            gid = node.globalID
+            @inbounds for k in 1:3
+                P[gid[k]] += fvec[k]
+            end
         end
     else
         error("Tributary distribution requires model context. Use populate_load!(model, load) instead.")

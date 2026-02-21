@@ -86,7 +86,7 @@ mutable struct FrameModel{E,L} <: ElementModel
     compliance::Float64
     tol::Float64
     processed::Bool
-    _factorization::Any   # Cached stiffness factorization (nothing if stale)
+    _factorization::Union{Nothing, Factorization}  # Cached stiffness factorization
     _elemental_loads::Union{Nothing, Vector{Vector{AbstractLoad}}}  # Lazy cache
     
     function FrameModel(nodes::Vector{Node}, elements::Vector{E}, loads::Vector{L}) where {E<:FrameElement, L<:AbstractLoad}
@@ -147,7 +147,7 @@ mutable struct ShellModel{E<:ShellElement,L<:AbstractLoad} <: ElementModel
     compliance::Float64
     tol::Float64
     processed::Bool
-    _factorization::Any   # Cached stiffness factorization (nothing if stale)
+    _factorization::Union{Nothing, Factorization}  # Cached stiffness factorization
     
     function ShellModel(nodes::Vector{Node}, elements::Vector{E}, loads::Vector{L}) where {E<:ShellElement, L<:AbstractLoad}
         nnodes = length(nodes)
@@ -221,7 +221,7 @@ mutable struct Model <: AbstractModel
     compliance::Float64
     tol::Float64
     processed::Bool
-    _factorization::Any   # Cached stiffness factorization (nothing if stale)
+    _factorization::Union{Nothing, Factorization}  # Cached stiffness factorization
     _elemental_loads::Union{Nothing, Vector{Vector{AbstractLoad}}}  # Lazy cache
     
     # Full constructor: frame + shell elements
@@ -460,7 +460,7 @@ mutable struct TrussModel <: ElementModel
     compliance::Float64
     tol::Float64
     processed::Bool
-    _factorization::Any   # Cached stiffness factorization (nothing if stale)
+    _factorization::Union{Nothing, Factorization}  # Cached stiffness factorization
     
     function TrussModel(nodes::Vector{TrussNode}, elements::Vector{TrussElement}, loads::Vector{NodeForce})
         nnodes = length(nodes)

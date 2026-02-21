@@ -191,7 +191,7 @@ function local_stiffness_natural!(K::Matrix{Float64}, E, G, A, I2, I3, J, Ay, Az
     return K
 end
 
-# Legacy overload (allocates temp — kept for API compat)
+# Overload without pre-allocated temp buffer (allocates temp6x12 internally)
 function local_stiffness_natural!(K::Matrix{Float64}, E, G, A, I2, I3, J, Ay, Az, L,
                                   aN::Matrix{Float64}, DN::Matrix{Float64})
     local_cartesian_to_natural!(aN, L)
@@ -246,101 +246,6 @@ function eccentricity_transformation!(Te::Matrix{Float64}, e_f1_1, e_f1_2, e_f2,
     return Te
 end
 
-# =============================================================================
-# Direct Stiffness Matrix Functions (Original ASAP API - kept for compatibility)
-# =============================================================================
-
-"""
-    k_fixedfixed(E, A, L, G, Ix, Iy, J; Ay=Inf, Az=Inf)
-
-12×12 stiffness matrix for beam with full coupling at both ends.
-Uses Timoshenko formulation when Ay, Az are finite.
-"""
-function k_fixedfixed(E, A, L, G, Ix, Iy, J; Ay=Inf, Az=Inf)
-    ws = _get_k_ws()
-    local_stiffness_natural!(ws.K_local, E, G, A, Iy, Ix, J, Ay, Az, L, ws.aN, ws.DN, ws.temp6x12)
-    return copy(ws.K_local)
-end
-
-"""
-    k_freefixed(E, A, L, Ix, Iy)
-
-12×12 stiffness matrix with rotational DOFs released at start node.
-"""
-function k_freefixed(E, A, L, Ix, Iy)
-    k = E / L^3 .* [A*L^2 0 0 0 0 0 -A*L^2 0 0 0 0 0;
-        0 3Ix 0 0 0 0 0 -3Ix 0 0 0 3L*Ix;
-        0 0 3Iy 0 0 0 0 0 -3Iy 0 -3L*Iy 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        -A*L^2 0 0 0 0 0 A*L^2 0 0 0 0 0;
-        0 -3Ix 0 0 0 0 0 3Ix 0 0 0 -3L*Ix;
-        0 0 -3Iy 0 0 0 0 0 3Iy 0 3L*Iy 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        0 0 -3L*Iy 0 0 0 0 0 3L*Iy 0 3L^2*Iy 0;
-        0 3L*Ix 0 0 0 0 0 -3L*Ix 0 0 0 3L^2*Ix    
-    ]
-    return k
-end
-
-"""
-    k_fixedfree(E, A, L, Ix, Iy)
-
-12×12 stiffness matrix with rotational DOFs released at end node.
-"""
-function k_fixedfree(E, A, L, Ix, Iy)
-    k = E / L^3 .* [A*L^2 0 0 0 0 0 -A*L^2 0 0 0 0 0;
-        0 3Ix 0 0 0 3L*Ix 0 -3Ix 0 0 0 0;
-        0 0 3Iy 0 -3L*Iy 0 0 0 -3Iy 0 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        0 0 -3L*Iy 0 3L^2*Iy 0 0 0 3L*Iy 0 0 0;
-        0 3L*Ix 0 0 0 3L^2*Ix 0 -3L*Ix 0 0 0 0;
-        -A*L^2 0 0 0 0 0 A*L^2 0 0 0 0 0;
-        0 -3Ix 0 0 0 -3L*Ix 0 3Ix 0 0 0 0;
-        0 0 -3Iy 0 3L*Iy 0 0 0 3Iy 0 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0    
-    ]
-    return k
-end
-
-"""
-    k_freefree(E, A, L)
-
-12×12 stiffness matrix for truss-like behavior (axial only).
-"""
-function k_freefree(E, A, L)
-    k = zeros(12, 12)
-    k[1,1] = 1
-    k[1,7] = -1
-    k[7,1] = -1
-    k[7,7] = 1
-    return E * A / L .* k
-end
-
-"""
-    k_joist(E, A, L, G, J)
-
-12×12 stiffness matrix with only axial and torsional coupling.
-"""
-function k_joist(E, A, L, G, J)
-    k = E / L^3 .* [A*L^2 0 0 0 0 0 -A*L^2 0 0 0 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        0 0 0 G*J*L^2/E 0 0 0 0 0 -G*J*L^2/E 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        -A*L^2 0 0 0 0 0 A*L^2 0 0 0 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        0 0 0 -G*J*L^2/E 0 0 0 0 0 G*J*L^2/E 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0;
-        0 0 0 0 0 0 0 0 0 0 0 0    
-    ]
-    return k
-end
 
 # =============================================================================
 # Element Local Stiffness Functions

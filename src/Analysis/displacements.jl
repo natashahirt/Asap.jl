@@ -115,9 +115,6 @@ function accumulatedisp!(
     end
 end
 
-function accumulatedisp!(load::LineLoad, xvals::AbstractVector{Float64}, Dy::Vector{Float64}, Dz::Vector{Float64})
-    accumulatedisp!(load, xvals, Dy, Dz, ElementProps(load.element))
-end
 
 # =============================================================================
 # accumulatedisp!  —  PointLoad
@@ -146,9 +143,6 @@ function accumulatedisp!(
     end
 end
 
-function accumulatedisp!(load::PointLoad, xvals::AbstractVector{Float64}, Dy::Vector{Float64}, Dz::Vector{Float64})
-    accumulatedisp!(load, xvals, Dy, Dz, ElementProps(load.element))
-end
 
 # =============================================================================
 # accumulatedisp!  —  TributaryLoad
@@ -200,9 +194,6 @@ function accumulatedisp!(
     end
 end
 
-function accumulatedisp!(load::TributaryLoad, xvals::AbstractVector{Float64}, Dy::Vector{Float64}, Dz::Vector{Float64})
-    accumulatedisp!(load, xvals, Dy, Dz, ElementProps(load.element))
-end
 
 # =============================================================================
 # accumulatedisp!  —  GravityLoad
@@ -234,9 +225,6 @@ function accumulatedisp!(
     end
 end
 
-function accumulatedisp!(load::GravityLoad, xvals::AbstractVector{Float64}, Dy::Vector{Float64}, Dz::Vector{Float64})
-    accumulatedisp!(load, xvals, Dy, Dz, ElementProps(load.element))
-end
 
 # =============================================================================
 # ElementDisplacements
@@ -352,7 +340,7 @@ function ElementDisplacements(element::AbstractElement, loads_for_elem::Abstract
     py = ustrip(u"m", element.nodeStart.position[2])
     pz = ustrip(u"m", element.nodeStart.position[3])
     ax_x, ax_y, ax_z = element.LCS[1][1], element.LCS[1][2], element.LCS[1][3]
-    xinc = collect(rng)
+    xvec = collect(rng)
     basepoints = Matrix{Float64}(undef, 3, resolution)
     @inbounds for j in 1:resolution
         basepoints[1,j] = px + ax_x * rng[j]
@@ -360,7 +348,7 @@ function ElementDisplacements(element::AbstractElement, loads_for_elem::Abstract
         basepoints[3,j] = pz + ax_z * rng[j]
     end
 
-    return ElementDisplacements(element, resolution, xinc, D, Dglobal, basepoints)
+    return ElementDisplacements(element, resolution, xvec, D, Dglobal, basepoints)
 end
 
 function ElementDisplacements(elements::AbstractVector{<:AbstractElement}, model::Union{FrameModel, Model}; resolution = 20)
@@ -415,9 +403,9 @@ function ElementDisplacements(elements::AbstractVector{<:AbstractElement}, model
             uglobal_all[3,k] = dx*lx[3] + dy*ly[3] + dz*lz[3]
             
             # Base positions along element axis
-            basepoint_all[1,k] = px + ax_x * xinc[j]
-            basepoint_all[2,k] = py + ax_y * xinc[j]
-            basepoint_all[3,k] = pz + ax_z * xinc[j]
+            basepoint_all[1,k] = px + ax_x * rng[j]
+            basepoint_all[2,k] = py + ax_y * rng[j]
+            basepoint_all[3,k] = pz + ax_z * rng[j]
         end
     end
 
@@ -441,6 +429,7 @@ function displacements(model::FrameModel, increment)
     inc_m = increment isa Unitful.Quantity ? ustrip(u"m", increment) : Float64(increment)
 
     results = Vector{ElementDisplacements}()
+    sizehint!(results, length(model.elements))
     for element in model.elements
         L = ustrip(u"m", element.length)
         n = max(Int(round(L / inc_m)), 2)
@@ -460,6 +449,7 @@ function displacements(model::Model, increment)
     
     results = Vector{ElementDisplacements}()
     ids = groupbyid(model.frame_elements)
+    sizehint!(results, length(ids))
 
     for id in ids
         elements = model.frame_elements[id]

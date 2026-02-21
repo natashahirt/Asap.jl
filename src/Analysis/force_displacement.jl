@@ -103,8 +103,8 @@ function ElementForceAndDisplacement(element::AbstractElement, loads::AbstractVe
         accumulatedisp!(load, rng, Dy, Dz, ep)
     end
 
-    xinc = collect(rng)
-    forces = ElementInternalForces(element, resolution, xinc, P, My, Vy, Mz, Vz)
+    xvec = collect(rng)
+    forces = ElementInternalForces(element, resolution, xvec, P, My, Vy, Mz, Vz)
 
     # ── Build displacement matrices ──
     D = Matrix{Float64}(undef, 3, resolution)
@@ -132,7 +132,7 @@ function ElementForceAndDisplacement(element::AbstractElement, loads::AbstractVe
         basepoints[3,j] = pz + ax_z * rng[j]
     end
 
-    disp = ElementDisplacements(element, resolution, xinc, D, Dglobal, basepoints)
+    disp = ElementDisplacements(element, resolution, xvec, D, Dglobal, basepoints)
 
     return ElementForceAndDisplacement(forces, disp)
 end

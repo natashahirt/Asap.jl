@@ -52,83 +52,55 @@ end
 # =============================================================================
 
 """
-    post_process_nodes!(model::AbstractModel)
+    _post_process_nodes_6dof!(model)
 
+Shared 6-DOF node post-processing (Frame, Shell, Model).
 Populate nodal reaction and displacement fields with Unitful quantities.
 Reactions are in SI base units: forces in N, moments in N*m.
 Displacements are in SI base units: translations in m, rotations in radians.
 """
-function post_process_nodes!(model::FrameModel)
+function _post_process_nodes_6dof!(model)
+    rxn = model.reactions
+    u_vec = model.u
     for node in model.nodes
-        global_ids = node.globalID
-        reactions_quantities = Vector{Quantity}(undef, length(global_ids))
-        displacements_quantities = Vector{Quantity}(undef, length(global_ids))
-        
-        for (i, gid) in enumerate(global_ids)
+        gid = node.globalID
+        n = length(gid)
+        rq = Vector{Quantity}(undef, n)
+        dq = Vector{Quantity}(undef, n)
+        @inbounds for i in 1:n
+            g = gid[i]
             if i <= 3
-                reactions_quantities[i] = model.reactions[gid] * u"N"
-                displacements_quantities[i] = model.u[gid] * u"m"
+                rq[i] = rxn[g] * u"N"
+                dq[i] = u_vec[g] * u"m"
             else
-                reactions_quantities[i] = model.reactions[gid] * u"N*m"
-                displacements_quantities[i] = model.u[gid] * u"rad"
+                rq[i] = rxn[g] * u"N*m"
+                dq[i] = u_vec[g] * u"rad"
             end
         end
-        
-        node.reaction = reactions_quantities
-        node.displacement = displacements_quantities
+        node.reaction = rq
+        node.displacement = dq
     end
 end
 
-function post_process_nodes!(model::ShellModel)
-    for node in model.nodes
-        global_ids = node.globalID
-        reactions_quantities = Vector{Quantity}(undef, length(global_ids))
-        displacements_quantities = Vector{Quantity}(undef, length(global_ids))
-        
-        for (i, gid) in enumerate(global_ids)
-            if i <= 3
-                reactions_quantities[i] = model.reactions[gid] * u"N"
-                displacements_quantities[i] = model.u[gid] * u"m"
-            else
-                reactions_quantities[i] = model.reactions[gid] * u"N*m"
-                displacements_quantities[i] = model.u[gid] * u"rad"
-            end
-        end
-        
-        node.reaction = reactions_quantities
-        node.displacement = displacements_quantities
-    end
-end
-
-function post_process_nodes!(model::Model)
-    for node in model.nodes
-        global_ids = node.globalID
-        reactions_quantities = Vector{Quantity}(undef, length(global_ids))
-        displacements_quantities = Vector{Quantity}(undef, length(global_ids))
-        
-        for (i, gid) in enumerate(global_ids)
-            if i <= 3
-                reactions_quantities[i] = model.reactions[gid] * u"N"
-                displacements_quantities[i] = model.u[gid] * u"m"
-            else
-                reactions_quantities[i] = model.reactions[gid] * u"N*m"
-                displacements_quantities[i] = model.u[gid] * u"rad"
-            end
-        end
-        
-        node.reaction = reactions_quantities
-        node.displacement = displacements_quantities
-    end
-end
+post_process_nodes!(model::FrameModel) = _post_process_nodes_6dof!(model)
+post_process_nodes!(model::ShellModel) = _post_process_nodes_6dof!(model)
+post_process_nodes!(model::Model) = _post_process_nodes_6dof!(model)
 
 function post_process_nodes!(model::TrussModel)
+    rxn = model.reactions
+    u_vec = model.u
     for node in model.nodes
-        global_ids = node.globalID
-        reactions_quantities = [model.reactions[gid] * u"N" for gid in global_ids]
-        displacements_quantities = [model.u[gid] * u"m" for gid in global_ids]
-        
-        node.reaction = reactions_quantities
-        node.displacement = displacements_quantities
+        gid = node.globalID
+        n = length(gid)
+        rq = Vector{Quantity}(undef, n)
+        dq = Vector{Quantity}(undef, n)
+        @inbounds for i in 1:n
+            g = gid[i]
+            rq[i] = rxn[g] * u"N"
+            dq[i] = u_vec[g] * u"m"
+        end
+        node.reaction = rq
+        node.displacement = dq
     end
 end
 

@@ -182,11 +182,25 @@ mutable struct TributaryLoad{R<:Release} <: ElementLoad{R}
     end
 end
 
-"""Compute line load intensities (N/m) at each breakpoint."""
+"""Keep `_pressure_Pa` in sync when `pressure` is mutated."""
+function Base.setproperty!(load::TributaryLoad, name::Symbol, value)
+    setfield!(load, name, value)
+    if name === :pressure
+        setfield!(load, :_pressure_Pa, Float64(ustrip(u"Pa", uconvert(u"Pa", value))))
+    end
+end
+
+"""Compute line load intensities (N/m) at each breakpoint — zero-allocation."""
 function intensities(load::TributaryLoad)::Vector{Float64}
-    p = to_pascals(load.pressure)
-    w = [to_meters(width) for width in load.widths]
-    return w .* p  # width (m) × pressure (N/m²) = N/m
+    return load._widths_m .* load._pressure_Pa
+end
+
+"""In-place version: write intensities into pre-allocated `out`."""
+function intensities!(out::Vector{Float64}, load::TributaryLoad)
+    @inbounds for i in eachindex(out, load._widths_m)
+        out[i] = load._widths_m[i] * load._pressure_Pa
+    end
+    return out
 end
 
 # =============================================================================
@@ -276,6 +290,16 @@ mutable struct AreaLoad <: AbstractLoad
         end
         
         new(shells, pressure_si, dir_norm, distribute_to, interior_beams, axis_tuple, 0, id, nothing)
+    end
+end
+
+"""Keep child TributaryLoad `_pressure_Pa` in sync when `pressure` is mutated."""
+function Base.setproperty!(load::AreaLoad, name::Symbol, value)
+    setfield!(load, name, value)
+    if name === :pressure && !isnothing(getfield(load, :_tributary_loads))
+        for trib_load in getfield(load, :_tributary_loads)
+            trib_load.pressure = value  # triggers TributaryLoad setproperty! → _pressure_Pa sync
+        end
     end
 end
 

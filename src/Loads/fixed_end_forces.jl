@@ -215,20 +215,24 @@ Equivalent fixed end forces for a piecewise-linear tributary load.
 Uses exact analytical integration for each linear segment.
 """
 function q_local(load::TributaryLoad)
-    LCS = load.element.LCS
     L = to_meters(load.element.length)
     
     # Get intensities (N/m) at each breakpoint
     w_vals = intensities(load)
     
-    # Build global load direction vector and transform to local
-    dir_global = collect(load.direction)
-    dir_local = load.element.R[1:3, 1:3] * dir_global .* LCS
+    # Inline rotation: global direction → negated local projections (zero alloc)
+    d1, d2, d3 = load.direction
+    R = @view load.element.R[1:3, 1:3]
+    @inbounds begin
+        px = -(R[1,1]*d1 + R[1,2]*d2 + R[1,3]*d3)
+        py = -(R[2,1]*d1 + R[2,2]*d2 + R[2,3]*d3)
+        pz = -(R[3,1]*d1 + R[3,2]*d2 + R[3,3]*d3)
+    end
     
     # Initialize FEM accumulator [ax1, vy1, vz1, 0, my1, mz1, ax2, vy2, vz2, 0, my2, mz2]
     fem = zeros(12)
     
-    # Sum contributions from each linear segment
+    # Sum contributions from each linear segment — in-place accumulation
     for i in 1:(length(load.positions) - 1)
         s_a = load.positions[i]
         s_b = load.positions[i + 1]
@@ -239,73 +243,56 @@ function q_local(load::TributaryLoad)
         (s_b - s_a) < 1e-12 && continue
         (abs(w_a) + abs(w_b)) < 1e-12 && continue
         
-        # Compute FEM contribution from this linear segment
-        fem .+= _fem_linear_segment(L, s_a, s_b, w_a, w_b, dir_local, LCS)
+        _fem_linear_segment!(fem, L, s_a, s_b, w_a, w_b, px, py, pz)
     end
     
     return fem
 end
 
 """
-Compute fixed-end forces for a linear load segment.
+Accumulate fixed-end forces for a linear load segment into `fem` (in-place).
 
-Arguments:
-- L: beam length (m)
-- s_a, s_b: normalized positions [0,1] of segment start/end
-- w_a, w_b: load intensities (N/m) at start/end
-- dir_local: load direction in local coordinates
-- LCS: local coordinate system vectors
+`px, py, pz` are the negated local-axis direction projections:
+  px = -(R * d)[1],  py = -(R * d)[2],  pz = -(R * d)[3]
+(where d is the global load direction and R rotates to local).
 """
-function _fem_linear_segment(L::Float64, s_a::Float64, s_b::Float64, 
-                             w_a::Float64, w_b::Float64,
-                             dir_local::Vector{Vector{Float64}}, 
-                             LCS::Vector{Vector{Float64}})
+function _fem_linear_segment!(fem::Vector{Float64},
+                              L::Float64, s_a::Float64, s_b::Float64,
+                              w_a::Float64, w_b::Float64,
+                              px::Float64, py::Float64, pz::Float64)
     # Absolute positions
     a = s_a * L
     b = s_b * L
-    ℓ = b - a  # segment length
-    
+
     # Decompose into uniform + triangular:
     # w(x) = w_a + (w_b - w_a)*(x - a)/ℓ
-    #      = w_a + Δw*(x - a)/ℓ  where Δw = w_b - w_a
-    w_uniform = w_a
     Δw = w_b - w_a
-    
-    # Fixed-end forces for uniform load w over [a, b]
-    # Using exact integrals of point-load FEM formulas
-    R_A_u, R_B_u, M_A_u, M_B_u = _fem_uniform_partial(L, a, b, w_uniform)
-    
-    # Fixed-end forces for triangular load (0 at a, Δw at b)
+
+    # Fixed-end forces for uniform + triangular partial loads
+    R_A_u, R_B_u, M_A_u, M_B_u = _fem_uniform_partial(L, a, b, w_a)
     R_A_t, R_B_t, M_A_t, M_B_t = _fem_triangular_partial(L, a, b, Δw)
-    
-    # Total reactions and moments
+
     R_A = R_A_u + R_A_t
     R_B = R_B_u + R_B_t
     M_A = M_A_u + M_A_t
     M_B = M_B_u + M_B_t
-    
-    # Distribute to FEM vector based on load direction
-    fem = zeros(12)
-    
-    # Axial component (in local X)
-    px = -dot(dir_local[1], LCS[1])
-    fem[1] += px * (R_A + R_B) / 2  # ax1 (simplified: half total)
-    fem[7] += px * (R_A + R_B) / 2  # ax2
-    
-    # Transverse in local Y
-    py = -dot(dir_local[2], LCS[2])
-    fem[2] += py * R_A         # vy1 (shear at start)
-    fem[8] += py * R_B         # vy2 (shear at end)
-    fem[6] += py * M_A         # mz1 (moment about Z at start)
-    fem[12] += py * M_B        # mz2 (moment about Z at end)
-    
-    # Transverse in local Z
-    pz = -dot(dir_local[3], LCS[3])
-    fem[3] += pz * R_A         # vz1
-    fem[9] += pz * R_B         # vz2
-    fem[5] += -pz * M_A        # my1 (note sign convention)
-    fem[11] += -pz * M_B       # my2
-    
+
+    # Axial (local X)
+    half_total = px * (R_A + R_B) / 2
+    @inbounds begin
+        fem[1]  += half_total     # ax1
+        fem[7]  += half_total     # ax2
+        # Transverse Y
+        fem[2]  += py * R_A       # vy1
+        fem[8]  += py * R_B       # vy2
+        fem[6]  += py * M_A       # mz1
+        fem[12] += py * M_B       # mz2
+        # Transverse Z
+        fem[3]  += pz * R_A       # vz1
+        fem[9]  += pz * R_B       # vz2
+        fem[5]  += -pz * M_A      # my1
+        fem[11] += -pz * M_B      # my2
+    end
     return fem
 end
 

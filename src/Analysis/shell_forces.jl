@@ -18,6 +18,42 @@ These are stress resultants integrated through the thickness.
 _fmt(x::Float64, decimals::Int=2) = string(round(x, digits=decimals))
 
 # ============================================================================
+# ShellForcesWorkspace — pre-allocated buffers for zero-alloc ShellInternalForces
+# ============================================================================
+
+"""
+    ShellForcesWorkspace
+
+Pre-allocated buffers for computing `ShellInternalForces` without heap allocations.
+Create one per thread and pass to `ShellInternalForces(elem, u, ws)`.
+"""
+struct ShellForcesWorkspace
+    u_elem::Vector{Float64}   # 18
+    u_local::Vector{Float64}  # 18
+    gradN_e::Matrix{Float64}  # 3×2
+    Bm::Matrix{Float64}       # 3×18
+    Bb::Matrix{Float64}       # 3×18
+    Bs::Matrix{Float64}       # 2×18
+    ε::Vector{Float64}        # 3
+    κ::Vector{Float64}        # 3
+    γ::Vector{Float64}        # 2
+    Dps::Matrix{Float64}      # 3×3
+    σ::Vector{Float64}        # 3
+    M::Vector{Float64}        # 3
+end
+
+function ShellForcesWorkspace()
+    ShellForcesWorkspace(
+        zeros(18), zeros(18),
+        zeros(3, 2), zeros(3, 18), zeros(3, 18), zeros(2, 18),
+        zeros(3), zeros(3), zeros(2),
+        zeros(3, 3), zeros(3), zeros(3),
+    )
+end
+
+const _SHELL_FORCES_WS = ShellForcesWorkspace[ShellForcesWorkspace() for _ in 1:Threads.nthreads()]
+
+# ============================================================================
 # Helper: Extract element DOFs from global displacement vector
 # ============================================================================
 
@@ -35,6 +71,20 @@ function _extract_local_dofs(elem::ShellElement, u_global::Vector{Float64})
         end
     end
     return elem.R * u_elem
+end
+
+"""In-place variant: fills `u_elem` and `u_local` from workspace."""
+@inline function _extract_local_dofs!(u_elem::Vector{Float64}, u_local::Vector{Float64},
+                                       elem::ShellElement, u_global::Vector{Float64})
+    fill!(u_elem, 0.0)
+    @inbounds for (i, node) in enumerate(elem.nodes)
+        off = (i - 1) * 6
+        for j in 1:6
+            u_elem[off + j] = u_global[node.globalID[j]]
+        end
+    end
+    mul!(u_local, elem.R, u_elem)
+    return u_local
 end
 
 # ============================================================================
@@ -102,44 +152,53 @@ println("Mx = \$(sif.Mxx) N·m/m")
 ```
 """
 function ShellInternalForces(elem::ShellTri3, u_global::Vector{Float64})
-    u_local = _extract_local_dofs(elem, u_global)
+    ws = _SHELL_FORCES_WS[Threads.threadid()]
+    return ShellInternalForces(elem, u_global, ws)
+end
+
+"""
+    ShellInternalForces(elem::ShellTri3, u_global, ws::ShellForcesWorkspace)
+
+Zero-allocation constructor using pre-allocated workspace buffers.
+"""
+function ShellInternalForces(elem::ShellTri3, u_global::Vector{Float64}, ws::ShellForcesWorkspace)
+    _extract_local_dofs!(ws.u_elem, ws.u_local, elem, u_global)
     
     # Compute gradient matrix and area
-    gradN_e = zeros(3, 2)
-    gradN_e, Ae = _compute_gradN_Ae!(gradN_e, elem.ecoords_e)
+    _, Ae = _compute_gradN_Ae!(ws.gradN_e, elem.ecoords_e)
     
     # --- Membrane forces ---
-    Bm = zeros(3, 18)
-    _Bmmat!(Bm, gradN_e)
-    ε_membrane = Bm * u_local
+    _Bmmat!(ws.Bm, ws.gradN_e)        # _Bmmat! calls fill! internally
+    mul!(ws.ε, ws.Bm, ws.u_local)
     
-    Dps = _plane_stress_D(elem.E, elem.ν)
-    σ_membrane = Dps * ε_membrane
+    _plane_stress_D!(ws.Dps, elem.E, elem.ν)
+    mul!(ws.σ, ws.Dps, ws.ε)
     
     t = elem.thickness
-    Nxx = σ_membrane[1] * t
-    Nyy = σ_membrane[2] * t
-    Nxy = σ_membrane[3] * t
+    Nxx = ws.σ[1] * t
+    Nyy = ws.σ[2] * t
+    Nxy = ws.σ[3] * t
     
     # --- Bending moments ---
-    Bb = zeros(3, 18)
-    _Bbmat!(Bb, gradN_e)
-    κ = Bb * u_local
+    _Bbmat!(ws.Bb, ws.gradN_e)         # _Bbmat! calls fill! internally
+    mul!(ws.κ, ws.Bb, ws.u_local)
     
-    D_bend = (t^3 / 12.0) * Dps
-    M = D_bend * κ
-    Mxx, Myy, Mxy = M[1], M[2], M[3]
+    fac = t^3 / 12.0
+    @inbounds for j in 1:3; ws.M[j] = 0.0; end
+    @inbounds for j in 1:3, i in 1:3
+        ws.M[i] += fac * ws.Dps[i, j] * ws.κ[j]
+    end
+    Mxx, Myy, Mxy = ws.M[1], ws.M[2], ws.M[3]
     
     # --- Transverse shear ---
-    Bs = zeros(2, 18)
-    _Bsmat!(Bs, elem.ecoords_e, Ae)
-    γ = Bs * u_local
+    _Bsmat!(ws.Bs, elem.ecoords_e, Ae) # _Bsmat! fills internally
+    mul!(ws.γ, ws.Bs, ws.u_local)
     
     G = elem.E / (2 * (1 + elem.ν))
     κ_shear = 5.0 / 6.0
     
-    Qxz = κ_shear * G * t * γ[1]
-    Qyz = κ_shear * G * t * γ[2]
+    Qxz = κ_shear * G * t * ws.γ[1]
+    Qyz = κ_shear * G * t * ws.γ[2]
     
     return ShellInternalForces(elem, Nxx, Nyy, Nxy, Mxx, Myy, Mxy, Qxz, Qyz, nothing)
 end

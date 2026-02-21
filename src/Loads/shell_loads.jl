@@ -185,16 +185,6 @@ function _get_shell_panel_boundary(
     return polygon
 end
 
-# Public wrappers for backward compatibility / testing
-"""Match beam to polygon edge. See AreaLoad for preferred API."""
-match_beam_to_polygon_edge(beam::FrameElement, vertices::Vector{<:Point}; tol=1e-6) = 
-    _match_beam_to_polygon_edge(beam, vertices; tol=tol)
-match_beam_to_polygon_edge(start::NTuple{2,Float64}, stop::NTuple{2,Float64}, verts::Vector{NTuple{2,Float64}}; tol=1e-6) = 
-    _match_beam_to_polygon_edge(start, stop, verts; tol=tol)
-
-"""Extract shell panel boundary. See AreaLoad for preferred API."""
-get_shell_panel_boundary(shells::Vector{<:ShellElement}; panel_id=nothing) = 
-    _get_shell_panel_boundary(shells; panel_id=panel_id)
 
 # =============================================================================
 # Helper: Extract Depth Profile from Tributary Polygon

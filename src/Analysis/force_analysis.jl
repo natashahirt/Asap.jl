@@ -133,19 +133,9 @@ function accumulate_force!(load::TributaryLoad,
     end
 end
 
-# Legacy: fallback without ElementProps (for backward compatibility)
-function accumulate_force!(load::TributaryLoad, 
-    xvals::AbstractVector{Float64}, 
-    P::Vector{Float64},
-    My::Vector{Float64}, 
-    Vy::Vector{Float64}, 
-    Mz::Vector{Float64}, 
-    Vz::Vector{Float64})
-    accumulate_force!(load, xvals, P, My, Vy, Mz, Vz, ElementProps(load.element))
-end
 
 # Helper: axial force from partial uniform load on [a, b]
-function _PLine_partial(w, L, x, a, b)
+@inline function _PLine_partial(w, L, x, a, b)
     F = w * (b - a)
     R_start = F * (L - (a + b) / 2) / L
     
@@ -179,7 +169,7 @@ end
 _MLine_partial(::SimplySupportedBehavior, w, L, x, a, b) = _MLine_partial_ss(w, L, x, a, b)
 _MLine_partial(::FixedFixedBehavior, w, L, x, a, b) = _MLine_partial_ff(w, L, x, a, b)
 
-function _MLine_partial_ss(w, L, x, a, b)
+@inline function _MLine_partial_ss(w, L, x, a, b)
     c = (a + b) / 2
     F = w * (b - a)
     Ra = F * (L - c) / L
@@ -193,7 +183,7 @@ function _MLine_partial_ss(w, L, x, a, b)
     end
 end
 
-function _MLine_partial_ff(w, L, x, a, b)
+@inline function _MLine_partial_ff(w, L, x, a, b)
     seg_len = b - a
     c = (a + b) / 2
     F = w * seg_len
@@ -215,7 +205,7 @@ end
 _MLine_partial_pf(w, L, x, a, b) = _MLine_partial_ss(w, L, x, a, b)
 _MLine_partial_fp(w, L, x, a, b) = _MLine_partial_ss(w, L, x, a, b)
 
-function _VLine_partial(element, w, L, x, a, b)
+@inline function _VLine_partial(element, w, L, x, a, b)
     c = (a + b) / 2
     F = w * (b - a)
     Ra = F * (L - c) / L
@@ -261,15 +251,6 @@ function accumulate_force!(load::LineLoad,
     end
 end
 
-function accumulate_force!(load::LineLoad, 
-    xvals::AbstractVector{Float64}, 
-    P::Vector{Float64},
-    My::Vector{Float64}, 
-    Vy::Vector{Float64}, 
-    Mz::Vector{Float64}, 
-    Vz::Vector{Float64})
-    accumulate_force!(load, xvals, P, My, Vy, Mz, Vz, ElementProps(load.element))
-end
 
 # =============================================================================
 # accumulate_force!  —  PointLoad
@@ -304,15 +285,6 @@ function accumulate_force!(load::PointLoad,
     end
 end
 
-function accumulate_force!(load::PointLoad, 
-    xvals::AbstractVector{Float64}, 
-    P::Vector{Float64},
-    My::Vector{Float64}, 
-    Vy::Vector{Float64}, 
-    Mz::Vector{Float64}, 
-    Vz::Vector{Float64})
-    accumulate_force!(load, xvals, P, My, Vy, Mz, Vz, ElementProps(load.element))
-end
 
 # =============================================================================
 # accumulate_force!  —  GravityLoad
@@ -350,15 +322,6 @@ function accumulate_force!(load::GravityLoad,
     end
 end
 
-function accumulate_force!(load::GravityLoad, 
-    xvals::AbstractVector{Float64}, 
-    P::Vector{Float64},
-    My::Vector{Float64}, 
-    Vy::Vector{Float64}, 
-    Mz::Vector{Float64}, 
-    Vz::Vector{Float64})
-    accumulate_force!(load, xvals, P, My, Vy, Mz, Vz, ElementProps(load.element))
-end
 
 # =============================================================================
 # ElementInternalForces  —  struct
@@ -492,6 +455,10 @@ function ElementInternalForces(element::AbstractElement, loads::AbstractVector{<
     return ElementInternalForces(element, resolution, collect(rng), P, My, Vy, Mz, Vz)
 end
 
+# =============================================================================
+# ElementInternalForces — sizehinted batch constructors
+# =============================================================================
+
 
 """
     get_elemental_loads(model) -> Vector{Vector{AbstractLoad}}
@@ -522,6 +489,23 @@ function get_elemental_loads(model::Model)
         end
     end
     model._elemental_loads = element_to_loads
+    return element_to_loads
+end
+
+"""
+    get_elemental_loads(loads, n_elements) -> Vector{Vector{AbstractLoad}}
+
+Build a per-element load map from an arbitrary load vector (no model required).
+Useful for post-processing displacement vectors from `solve(model, cases)` where
+each case has its own load set.
+"""
+function get_elemental_loads(loads::Vector{<:AbstractLoad}, n_elements::Int)
+    element_to_loads = [AbstractLoad[] for _ in 1:n_elements]
+    for load in loads
+        hasproperty(load, :element) || continue
+        eid = load.element.elementID
+        (1 <= eid <= n_elements) && push!(element_to_loads[eid], load)
+    end
     return element_to_loads
 end
 
@@ -637,15 +621,36 @@ function ElementInternalForces(model::FrameModel, increment)
 
     IF = [ElementInternalForces(e, model.u[e.globalID], element_loads[e.elementID], inc_m, etype2DOF[typeof(e)]) for e in model.elements]
 
-    x = vcat([IF[i].x .+ IF[i].L / 2 .+ sum(IF[j].L for j = 1:i-1; init = 0.0) for i = 1:length(IF)]...)
-    L = sum([IF[i].L for i = 1:length(IF)])
-    P = vcat([IF[i].P for i = 1:length(IF)]...)
-    My = vcat([IF[i].My for i = 1:length(IF)]...)
-    Vy = vcat([IF[i].Vy for i = 1:length(IF)]...)
-    Mz = vcat([IF[i].Mz for i = 1:length(IF)]...)
-    Vz = vcat([IF[i].Vz for i = 1:length(IF)]...)
+    # Preallocate concatenated arrays (avoids vcat + splat allocations)
+    total_pts = sum(length(IF[i].x) for i in eachindex(IF))
+    L_total = sum(IF[i].L for i in eachindex(IF))
+    x  = Vector{Float64}(undef, total_pts)
+    P  = Vector{Float64}(undef, total_pts)
+    My = Vector{Float64}(undef, total_pts)
+    Vy = Vector{Float64}(undef, total_pts)
+    Mz = Vector{Float64}(undef, total_pts)
+    Vz = Vector{Float64}(undef, total_pts)
 
-    return ElementInternalForces(nothing, L, x, P, My, Vy, Mz, Vz)
+    offset = 0
+    x_cum = 0.0
+    @inbounds for i in eachindex(IF)
+        eif = IF[i]
+        n = length(eif.x)
+        x_off = x_cum + eif.L / 2
+        for j in 1:n
+            k = offset + j
+            x[k]  = eif.x[j] + x_off
+            P[k]  = eif.P[j]
+            My[k] = eif.My[j]
+            Vy[k] = eif.Vy[j]
+            Mz[k] = eif.Mz[j]
+            Vz[k] = eif.Vz[j]
+        end
+        offset += n
+        x_cum += eif.L
+    end
+
+    return ElementInternalForces(nothing, L_total, x, P, My, Vy, Mz, Vz)
 end
 
 """
@@ -668,6 +673,7 @@ function ElementInternalForces(model::Model, increment)
     end
 
     results = Vector{ElementInternalForces}()
+    sizehint!(results, length(model.frame_elements))
     element_loads_map = get_elemental_loads(model)
 
     for element in model.frame_elements
@@ -710,41 +716,100 @@ function load_envelopes(model::Union{FrameModel, Model}, loads::Vector{Vector{<:
         push!(forceresults, forces(model, increment))
     end
 
-    n = length(first(forceresults))
+    n_elem = length(first(forceresults))
+    n_loads = length(forceresults)
+    sizehint!(envelopes, n_elem)
 
-    for i = 1:n
-        e = first(forceresults)[i].element
-        res = first(forceresults)[i].resolution
-        x = first(forceresults)[i].x
+    for i = 1:n_elem
+        ref = first(forceresults)[i]
+        e   = ref.element
+        res = ref.resolution
+        x   = ref.x
+        n_pts = length(x)
 
-        P = hcat(getproperty.(getindex.(forceresults, i), :P)...)
-        My = hcat(getproperty.(getindex.(forceresults, i), :My)...)
-        Vy = hcat(getproperty.(getindex.(forceresults, i), :Vy)...)
-        Mz = hcat(getproperty.(getindex.(forceresults, i), :Mz)...)
-        Vz = hcat(getproperty.(getindex.(forceresults, i), :Vz)...)
+        # Preallocate matrices (pts × load cases) — avoids hcat+getproperty broadcasts
+        Pm  = Matrix{Float64}(undef, n_pts, n_loads)
+        Mym = Matrix{Float64}(undef, n_pts, n_loads)
+        Vym = Matrix{Float64}(undef, n_pts, n_loads)
+        Mzm = Matrix{Float64}(undef, n_pts, n_loads)
+        Vzm = Matrix{Float64}(undef, n_pts, n_loads)
 
-        Prange = extrema.(eachrow(P))
-        Myrange = extrema.(eachrow(My))
-        Vyrange = extrema.(eachrow(Vy))
-        Mzrange = extrema.(eachrow(Mz))
-        Vzrange = extrema.(eachrow(Vz))
+        @inbounds for j in 1:n_loads
+            fr = forceresults[j][i]
+            for k in 1:n_pts
+                Pm[k, j]  = fr.P[k]
+                Mym[k, j] = fr.My[k]
+                Vym[k, j] = fr.Vy[k]
+                Mzm[k, j] = fr.Mz[k]
+                Vzm[k, j] = fr.Vz[k]
+            end
+        end
 
-        envelope = ForceEnvelopes(e,
-            res,
-            x,
-            getindex.(Prange, 1),
-            getindex.(Prange, 2),
-            getindex.(Myrange, 1),
-            getindex.(Myrange, 2),
-            getindex.(Vyrange, 1),
-            getindex.(Vyrange, 2),
-            getindex.(Mzrange, 1),
-            getindex.(Mzrange, 2),
-            getindex.(Vzrange, 1),
-            getindex.(Vzrange, 2))
+        # Compute envelopes row-by-row
+        Plow  = Vector{Float64}(undef, n_pts);  Phigh  = Vector{Float64}(undef, n_pts)
+        Mylow = Vector{Float64}(undef, n_pts);  Myhigh = Vector{Float64}(undef, n_pts)
+        Vylow = Vector{Float64}(undef, n_pts);  Vyhigh = Vector{Float64}(undef, n_pts)
+        Mzlow = Vector{Float64}(undef, n_pts);  Mzhigh = Vector{Float64}(undef, n_pts)
+        Vzlow = Vector{Float64}(undef, n_pts);  Vzhigh = Vector{Float64}(undef, n_pts)
 
-        push!(envelopes, envelope)
+        @inbounds for k in 1:n_pts
+            lo, hi = Pm[k, 1], Pm[k, 1]
+            for j in 2:n_loads; v = Pm[k,j]; v < lo && (lo = v); v > hi && (hi = v); end
+            Plow[k] = lo; Phigh[k] = hi
+
+            lo, hi = Mym[k, 1], Mym[k, 1]
+            for j in 2:n_loads; v = Mym[k,j]; v < lo && (lo = v); v > hi && (hi = v); end
+            Mylow[k] = lo; Myhigh[k] = hi
+
+            lo, hi = Vym[k, 1], Vym[k, 1]
+            for j in 2:n_loads; v = Vym[k,j]; v < lo && (lo = v); v > hi && (hi = v); end
+            Vylow[k] = lo; Vyhigh[k] = hi
+
+            lo, hi = Mzm[k, 1], Mzm[k, 1]
+            for j in 2:n_loads; v = Mzm[k,j]; v < lo && (lo = v); v > hi && (hi = v); end
+            Mzlow[k] = lo; Mzhigh[k] = hi
+
+            lo, hi = Vzm[k, 1], Vzm[k, 1]
+            for j in 2:n_loads; v = Vzm[k,j]; v < lo && (lo = v); v > hi && (hi = v); end
+            Vzlow[k] = lo; Vzhigh[k] = hi
+        end
+
+        push!(envelopes, ForceEnvelopes(e, res, x,
+            Plow, Phigh, Mylow, Myhigh, Vylow, Vyhigh, Mzlow, Mzhigh, Vzlow, Vzhigh))
     end
 
     return envelopes
+end
+
+# =============================================================================
+# Convenience: moments! / shear! for frame elements
+# =============================================================================
+
+"""
+    moments!(My, Mz, element, model; resolution=20)
+
+Write bending moments My (about local Y) and Mz (about local Z) into
+pre-allocated vectors.  Returns `(My, Mz)`.
+"""
+function moments!(My::Vector{Float64}, Mz::Vector{Float64},
+                  element::AbstractElement, model::Union{FrameModel, Model};
+                  resolution::Int = 20)
+    eif = ElementInternalForces(element, model; resolution=resolution)
+    copyto!(My, eif.My)
+    copyto!(Mz, eif.Mz)
+    return (My, Mz)
+end
+
+"""
+    shears!(Vy, Vz, element, model; resolution=20)
+
+Write shear forces Vy and Vz into pre-allocated vectors.  Returns `(Vy, Vz)`.
+"""
+function shears!(Vy::Vector{Float64}, Vz::Vector{Float64},
+                 element::AbstractElement, model::Union{FrameModel, Model};
+                 resolution::Int = 20)
+    eif = ElementInternalForces(element, model; resolution=resolution)
+    copyto!(Vy, eif.Vy)
+    copyto!(Vz, eif.Vz)
+    return (Vy, Vz)
 end
