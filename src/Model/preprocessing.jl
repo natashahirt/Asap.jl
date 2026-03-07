@@ -133,10 +133,12 @@ end
     process_elements!(model::ShellModel)
     
 Process shell elements in a shell model.
+Thread-parallel: each element's LCS/R/K is independent.
 """
 function process_elements!(model::ShellModel)
-    for elem in model.elements
-        process!(elem)
+    elems = model.elements
+    Threads.@threads for i in eachindex(elems)
+        process!(elems[i])
     end
 end
 
@@ -144,9 +146,10 @@ end
     process_elements!(model::Model)
     
 Process all elements in a unified model (both frame and shell).
+Shell element processing is thread-parallel (each element is independent).
 """
 function process_elements!(model::Model)
-    # Process frame elements
+    # Process frame elements (typically few — sequential)
     for element in model.frame_elements
         fill!(element.Q, 0.0)
         lcs!(element, element.Ψ)
@@ -155,9 +158,10 @@ function process_elements!(model::Model)
         global_K!(element)
     end
     
-    # Process shell elements
-    for elem in model.shell_elements
-        process!(elem)
+    # Process shell elements — embarrassingly parallel
+    shells = model.shell_elements
+    Threads.@threads for i in eachindex(shells)
+        process!(shells[i])
     end
 end
 
@@ -194,11 +198,12 @@ end
     process_elements!(elements::Vector{<:ShellElement})
 
 Process a vector of shell elements: compute LCS, transformation R, stiffness K, and mass M.
+Thread-parallel: each element's processing is independent.
 """
 function process_elements!(elements::Vector{T}) where {T<:ShellElement}
-    for elem in elements
-        process!(elem)
-        populate_globalID!(elem)
+    Threads.@threads for i in eachindex(elements)
+        process!(elements[i])
+        populate_globalID!(elements[i])
     end
 end
 
@@ -519,22 +524,37 @@ end
     create_S!(model::ShellModel)
 
 Assemble the global stiffness matrix S for a shell model.
+Thread-parallel: each element fills its own contiguous block of COO triplets.
 """
 function create_S!(model::ShellModel)
-    nnz_tot = sum(length(e.globalID)^2 for e in model.elements; init=0)
+    n_elem = length(model.elements)
+
+    # Precompute per-element nnz and cumulative offsets
+    elem_nnz = Vector{Int}(undef, n_elem)
+    @inbounds for k in 1:n_elem
+        elem_nnz[k] = length(model.elements[k].globalID)^2
+    end
+    offsets = Vector{Int}(undef, n_elem + 1)
+    offsets[1] = 0
+    @inbounds for k in 1:n_elem
+        offsets[k + 1] = offsets[k] + elem_nnz[k]
+    end
+    nnz_tot = offsets[end]
+
     I = Vector{Int64}(undef, nnz_tot)
     J = Vector{Int64}(undef, nnz_tot)
     V = Vector{Float64}(undef, nnz_tot)
 
-    pos = 0
-    for element in model.elements
+    Threads.@threads for k in 1:n_elem
+        element = model.elements[k]
         idx = element.globalID
         n = length(idx)
+        p = offsets[k]
         @inbounds for i = 1:n, j = 1:n
-            pos += 1
-            I[pos] = idx[i]
-            J[pos] = idx[j]
-            V[pos] = element.K[i,j]
+            p += 1
+            I[p] = idx[i]
+            J[p] = idx[j]
+            V[p] = element.K[i,j]
         end
     end
 
@@ -545,14 +565,31 @@ end
     create_S!(model::Model)
 
 Assemble the global stiffness matrix S for a unified model.
+Frame elements are filled sequentially (few elements), then shell elements
+are filled in parallel (each element writes to its own contiguous COO block).
 """
 function create_S!(model::Model)
-    nnz_tot = 144 * length(model.frame_elements) +
-              sum(length(e.globalID)^2 for e in model.shell_elements; init=0)
+    n_frame = length(model.frame_elements)
+    n_shell = length(model.shell_elements)
+    nnz_frame = 144 * n_frame
+
+    # Precompute per-shell-element nnz and cumulative offsets
+    shell_nnz = Vector{Int}(undef, n_shell)
+    @inbounds for k in 1:n_shell
+        shell_nnz[k] = length(model.shell_elements[k].globalID)^2
+    end
+    shell_offsets = Vector{Int}(undef, n_shell + 1)
+    shell_offsets[1] = nnz_frame
+    @inbounds for k in 1:n_shell
+        shell_offsets[k + 1] = shell_offsets[k] + shell_nnz[k]
+    end
+    nnz_tot = shell_offsets[end]
+
     I = Vector{Int64}(undef, nnz_tot)
     J = Vector{Int64}(undef, nnz_tot)
     V = Vector{Float64}(undef, nnz_tot)
 
+    # Frame elements — sequential (typically few)
     pos = 0
     for element in model.frame_elements
         idx = element.globalID
@@ -565,14 +602,17 @@ function create_S!(model::Model)
         end
     end
 
-    for element in model.shell_elements
+    # Shell elements — parallel COO fill
+    Threads.@threads for k in 1:n_shell
+        element = model.shell_elements[k]
         idx = element.globalID
         n = length(idx)
+        p = shell_offsets[k]
         @inbounds for i = 1:n, j = 1:n
-            pos += 1
-            I[pos] = idx[i]
-            J[pos] = idx[j]
-            V[pos] = element.K[i,j]
+            p += 1
+            I[p] = idx[i]
+            J[p] = idx[j]
+            V[p] = element.K[i,j]
         end
     end
 

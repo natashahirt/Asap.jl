@@ -732,8 +732,10 @@ function update!(model::Model; values_only::Bool = false, loads_only::Bool = fal
         for element in model.frame_elements
             global_K!(element)
         end
-        for elem in model.shell_elements
-            global_K!(elem)
+        # Shell global_K! is thread-safe (writes only to per-element fields)
+        shells = model.shell_elements
+        Threads.@threads for i in eachindex(shells)
+            global_K!(shells[i])
         end
         populate_loads!(model)
         _update_S_values!(model)
@@ -755,8 +757,10 @@ function update!(model::ShellModel; values_only::Bool = false, loads_only::Bool 
         # Only load magnitudes changed — K and S untouched, keep factorization
         populate_loads!(model)
     elseif values_only
-        for elem in model.elements
-            global_K!(elem)
+        # Shell global_K! is thread-safe (writes only to per-element fields)
+        elems = model.elements
+        Threads.@threads for i in eachindex(elems)
+            global_K!(elems[i])
         end
         populate_loads!(model)
         _update_S_values!(model)
