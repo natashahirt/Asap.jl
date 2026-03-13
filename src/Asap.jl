@@ -9,6 +9,14 @@ using Unitful
 # All unit definitions, type aliases, and conversion helpers.
 # Other packages (StructuralSizer, StructuralSynthesizer) import from here.
 include("Units/units.jl")
+Unitful.register(Asap)
+
+# Snapshot Unitful.basefactors after @unit definitions so __init__ can restore
+# them at runtime. Precompilation serialises the module but *not* mutations to
+# Unitful's internal dicts, so without this merge the conversion factor lookup
+# for custom units (kip, ksi, psf, …) raises KeyError.
+# See: https://painterqubits.github.io/Unitful.jl/stable/extending/
+const _localunits = copy(Unitful.basefactors)
 
 # US Customary units
 export kip, ksi, psf, ksf, pcf
@@ -294,6 +302,7 @@ export load_envelopes
 export get_elemental_loads, clear_elemental_loads!
 export ElementDisplacements
 export displacements
+export element_max_deflections
 # Shell internal forces
 export ShellInternalForces, ShellForcesWorkspace
 export principal_moments
@@ -311,5 +320,16 @@ export shell_centroid
 export shell_centroid_3d
 export shell_tris_at_point
 export shell_tris_in_region
+
+function __init__()
+    merge!(Unitful.basefactors, _localunits)
+    Unitful.register(Asap)
+    # Verify custom units survived precompilation → runtime transition.
+    # If this fails, something is deeply wrong with Dict serialisation.
+    for sym in (:Kip, :KipPerSquareInch, :PoundPerSquareFoot, :KipPerSquareFoot, :PoundPerCubicFoot)
+        haskey(Unitful.basefactors, sym) && continue
+        @error "Asap.__init__: Unitful.basefactors missing :$sym after merge! — unit conversions will fail"
+    end
+end
 
 end 
