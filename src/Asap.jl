@@ -137,6 +137,8 @@ export rotational_stiffness
 export ShellSection
 export ShellPatch
 export Shell
+export VaultShell
+export get_vault_mesh_data
 export mesh
 export get_nodes
 # Diaphragm (rigid in-plane, massless)

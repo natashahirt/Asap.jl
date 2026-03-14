@@ -558,7 +558,19 @@ function _get_factorization(model::AbstractModel)
         fact = ldlt(K; check=false)
         if !issuccess(fact)
             @warn "LDLᵀ failed — falling back to LU"
-            fact = lu(model.S[idx, idx])
+            K_unsym = model.S[idx, idx]
+            fact = lu(K_unsym)
+            # Spot-check: solve K*x = e₁ and verify residual isn't huge
+            n = size(K_unsym, 1)
+            if n > 0
+                e1 = zeros(n); e1[1] = 1.0
+                x1 = fact \ e1
+                resid = norm(K_unsym * x1 - e1) / max(norm(e1), 1.0)
+                if resid > 1e-6
+                    @error "Stiffness matrix appears singular or severely ill-conditioned " *
+                           "(residual = $(resid)). Check boundary conditions and supports."
+                end
+            end
         end
     end
     model._factorization = fact

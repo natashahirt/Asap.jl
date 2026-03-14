@@ -22,7 +22,10 @@ end
 Base.length(element::T) where {T<:AbstractElement} = norm([to_meters(p) for p in (element.nodeEnd.position .- element.nodeStart.position)]) * u"m"
 
 function length!(element::T) where {T<:AbstractElement}
-    element.length = length(element)
+    L = length(element)
+    to_meters(L) > 0 || error("Zero-length element detected between nodes at " *
+        "$(element.nodeStart.position) — check for coincident nodes (id=:$(element.id))")
+    element.length = L
 end
 
 

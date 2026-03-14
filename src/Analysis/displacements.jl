@@ -461,3 +461,79 @@ function displacements(model::Model, increment)
 
     return results
 end
+
+
+# =============================================================================
+# element_max_deflections  —  nodal-only max |δ| per element from arbitrary u
+# =============================================================================
+
+"""
+    element_max_deflections(model, u; resolution=20)
+
+Return a `Dict{Int, Float64}` mapping each frame element's `elementID` to
+its maximum absolute transverse deflection (meters) along the element,
+computed from the displacement vector `u` via Hermite cubic interpolation.
+
+Unlike `ElementDisplacements`, this function reads directly from `u` rather
+than from `node.displacement`, so it can be used with any displacement vector
+(e.g. service-load D-only, L-only, or D+L) without mutating the model.
+
+Only nodal shape-function interpolation is used (no load-based corrections),
+which is accurate when spans are meshed with multiple elements.
+
+The transverse deflection is measured in the element's **local Z** direction
+(strong-axis bending plane for standard floor beams).
+
+# Arguments
+- `model` — `FrameModel` or `Model`
+- `u::Vector{Float64}` — global displacement vector (length = nDOFs)
+- `resolution::Int` — sampling points per element (default 20)
+"""
+function element_max_deflections(
+    model::Union{FrameModel, Model},
+    u::Vector{Float64};
+    resolution::Int = 20,
+)
+    elements = model isa FrameModel ? model.elements : model.frame_elements
+    result = Dict{Int, Float64}()
+    sizehint!(result, length(elements))
+
+    _ug = Vector{Float64}(undef, 12)
+    _ul = Vector{Float64}(undef, 12)
+
+    for el in elements
+        gid = el.globalID
+        @inbounds for i in 1:12
+            _ug[i] = u[gid[i]]
+        end
+        mul!(_ul, el.R, _ug)
+
+        dofs = etype2DOF[typeof(el)]
+        @inbounds for i in 1:12
+            _ul[i] *= dofs[i]
+        end
+
+        L = ustrip(u"m", el.length)
+        L <= 0 && continue
+
+        uZ1 = _ul[3]; uZ2 = -_ul[5]; uZ3 = _ul[9]; uZ4 = -_ul[11]
+
+        δ_max = 0.0
+        @inbounds for i in 0:(resolution - 1)
+            xL = i / (resolution - 1)
+            x  = xL * L
+            n1 = 1 - 3xL^2 + 2xL^3
+            n2 = x * (1 - xL)^2
+            n3 = 3xL^2 - 2xL^3
+            n4 = x^2/L * (-1 + xL)
+            dz = abs(n1*uZ1 + n2*uZ2 + n3*uZ3 + n4*uZ4)
+            δ_max = max(δ_max, dz)
+        end
+
+        eid = el.elementID
+        prev = get(result, eid, 0.0)
+        result[eid] = max(prev, δ_max)
+    end
+
+    return result
+end
