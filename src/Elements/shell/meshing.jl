@@ -830,8 +830,8 @@ function mesh(
     boundary_pts = [(ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2])) 
                     for node in corners]
     
-    # Convert interior supports to _SupportLine
-    support_lines = [_to_support_line(s) for s in interior_supports]
+    # Convert interior supports to _SupportLine (explicit type avoids Vector{Any} when interior_supports is untyped)
+    support_lines = _SupportLine[_to_support_line(s) for s in interior_supports]
     
     # Generate all points (boundary + interior + support lines) without duplicates
     all_points, support_point_indices, _ = _generate_mesh_points_with_supports(boundary_pts, n, support_lines)
@@ -959,8 +959,8 @@ function Shell(
         nothing
     end
     
-    # Convert interior supports
-    support_lines = [_to_support_line(s) for s in interior_supports]
+    # Convert interior supports (explicit type avoids Vector{Any} when interior_supports is untyped)
+    support_lines = _SupportLine[_to_support_line(s) for s in interior_supports]
     
     # ===========================================================================
     # Resolve refinement targets
@@ -2357,7 +2357,7 @@ function VaultShell(
     
     # ── Fallback: Dense grid mesh ──
     all_points, _, interior_node_map = _generate_mesh_points_with_supports(
-        boundary_pts, effective_n, [], interior_node_pts)
+        boundary_pts, effective_n, _SupportLine[], interior_node_pts)
     
     boundary_loop = vcat(collect(1:nc), [1])
     tri = DT.triangulate(all_points; boundary_nodes=[boundary_loop])
@@ -2519,7 +2519,7 @@ function get_vault_mesh_data(
     end
     
     # Generate 2D mesh points
-    all_points, _, _ = _generate_mesh_points_with_supports(boundary_pts, effective_n, [], [])
+    all_points, _, _ = _generate_mesh_points_with_supports(boundary_pts, effective_n, _SupportLine[], Tuple{Float64, Float64}[])
     
     # Triangulate
     boundary_loop = vcat(collect(1:nc), [1])
