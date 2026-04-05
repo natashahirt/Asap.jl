@@ -194,20 +194,26 @@ function _graded_spacing(x0::Float64, x1::Float64, targets::Vector{Float64},
 end
 
 """
-    _warn_mesh_density(h, Lx, Ly)
+    _warn_mesh_density(h, Lx, Ly; reference_shortest_side=nothing)
 
 Warn if the effective mesh density seems unreasonably coarse or fine.
-Thresholds are expressed in terms of effective `n` (divisions along the shortest side).
+Thresholds are expressed in terms of effective `n` (divisions along a reference shortest side).
+
+When `reference_shortest_side` is set (meters), it is used instead of `min(Lx, Ly)` from the
+panel bounding box. Callers meshing a **multi-cell** slab as one polygon should pass the
+typical cell shortest span so `n` reflects per-cell density (matching how `target_edge_length`
+is often chosen), not divisions across the full outline.
 """
-function _warn_mesh_density(h::Float64, Lx::Float64, Ly::Float64)
-    L_min = min(Lx, Ly)
+function _warn_mesh_density(h::Float64, Lx::Float64, Ly::Float64;
+                          reference_shortest_side::Union{Float64, Nothing} = nothing)
+    L_min = something(reference_shortest_side, min(Lx, Ly))
     effective_n = L_min / h
     if effective_n < 4
         @warn "Shell mesh is very coarse (effective n ≈ $(round(effective_n, digits=1)) " *
-              "on shortest side). Consider reducing target_edge_length."
+              "per reference shortest side). Consider reducing target_edge_length."
     elseif effective_n > 100
         @warn "Shell mesh is very fine (effective n ≈ $(round(effective_n, digits=1)) " *
-              "on shortest side). Consider increasing target_edge_length for faster analysis."
+              "per reference shortest side). Consider increasing target_edge_length for faster analysis."
     end
 end
 
@@ -860,6 +866,9 @@ Create triangular shell elements from any polygon with support conditions.
 - `target_edge_length`: Target element size (default: `0.25u"m"`). Overrides `n` when provided.
   For rectangular panels **without refinement**, uses structured mesh; otherwise Delaunay.
   Set to `nothing` to fall back to legacy `n`-based meshing.
+- `mesh_density_warn_shortest_side_m`: Optional. When set (meters), mesh-density warnings use this as the
+  reference shortest side instead of the polygon bounding-box `min(Lx, Ly)`. Use for one shell covering
+  many structural cells so warnings reflect per-cell `n`, not divisions across the full outline.
 
 # Keyword Arguments — refinement
 - `refinement_edge_length`: Element size near refinement targets (e.g., `0.1u"m"`).
@@ -919,7 +928,8 @@ function Shell(
     target_edge_length::Union{Quantity, Real, Nothing} = nothing,
     refinement_edge_length::Union{Quantity, Real, Nothing} = nothing,
     refinement_radius::Union{Quantity, Real, Nothing} = nothing,
-    refinement_targets::Union{Symbol, Vector{Node}, Nothing} = :auto
+    refinement_targets::Union{Symbol, Vector{Node}, Nothing} = :auto,
+    mesh_density_warn_shortest_side_m::Union{Float64, Nothing} = nothing,
 ) where N
     nc = length(corners)
     
@@ -997,7 +1007,7 @@ function Shell(
     
     # Warn if mesh density looks unreasonable
     if h_far !== nothing
-        _warn_mesh_density(h_far, Lx, Ly)
+        _warn_mesh_density(h_far, Lx, Ly; reference_shortest_side=mesh_density_warn_shortest_side_m)
     end
     
     # ===========================================================================
@@ -1230,7 +1240,8 @@ function Shell(
     target_edge_length::Union{Quantity, Real, Nothing} = 0.25u"m",
     refinement_edge_length::Union{Quantity, Real, Nothing} = nothing,
     refinement_radius::Union{Quantity, Real, Nothing} = nothing,
-    refinement_targets::Union{Symbol, Vector{Node}, Nothing} = :auto
+    refinement_targets::Union{Symbol, Vector{Node}, Nothing} = :auto,
+    mesh_density_warn_shortest_side_m::Union{Float64, Nothing} = nothing,
 ) where N
     return Shell(corners, n, section; 
         id=id, 
@@ -1242,7 +1253,8 @@ function Shell(
         target_edge_length=target_edge_length,
         refinement_edge_length=refinement_edge_length,
         refinement_radius=refinement_radius,
-        refinement_targets=refinement_targets
+        refinement_targets=refinement_targets,
+        mesh_density_warn_shortest_side_m=mesh_density_warn_shortest_side_m,
     )
 end
 
@@ -2151,6 +2163,7 @@ near columns/supports.
 - `refinement_edge_length`: Element size near refinement targets (e.g., `0.1u"m"`)
 - `refinement_radius`: Transition distance from fine to coarse (default: 5× refinement_edge_length)
 - `refinement_targets`: `:auto` (from interior_nodes), `:none`, or `Vector{Node}`
+- `mesh_density_warn_shortest_side_m`: Optional meters; same as flat `Shell` — use for per-cell reference when the plan outline is much larger than a typical cell.
 
 # Keyword Arguments — supports
 - `id::Symbol=:vault`: Element identifier
@@ -2189,7 +2202,8 @@ function VaultShell(
     target_edge_length::Union{Quantity, Real, Nothing} = 0.25u"m",
     refinement_edge_length::Union{Quantity, Real, Nothing} = nothing,
     refinement_radius::Union{Quantity, Real, Nothing} = nothing,
-    refinement_targets::Union{Symbol, Vector{Node}, Nothing} = :auto
+    refinement_targets::Union{Symbol, Vector{Node}, Nothing} = :auto,
+    mesh_density_warn_shortest_side_m::Union{Float64, Nothing} = nothing,
 )
     nc = length(corners)
     @assert nc == 4 "VaultShell requires exactly 4 corner nodes (rectangular plan)"
@@ -2256,6 +2270,10 @@ function VaultShell(
     ymax = maximum(p[2] for p in boundary_pts)
     Lx = xmax - xmin
     Ly = ymax - ymin
+
+    if h_far !== nothing
+        _warn_mesh_density(h_far, Lx, Ly; reference_shortest_side=mesh_density_warn_shortest_side_m)
+    end
     
     # ===========================================================================
     # Resolve refinement targets
