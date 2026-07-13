@@ -11,15 +11,26 @@ using Unitful
 include("Units/units.jl")
 Unitful.register(Asap)
 
-# Snapshot Unitful.basefactors after @unit definitions so __init__ can restore
-# them at runtime. Precompilation serialises the module but *not* mutations to
-# Unitful's internal dicts, so without this merge the conversion factor lookup
-# for custom units (kip, ksi, psf, …) raises KeyError.
+# Snapshot Unitful.basefactors after @unit / @refunit definitions so __init__
+# can restore them at runtime. Precompilation serialises the module but *not*
+# mutations to Unitful's internal dicts, so without this merge the conversion
+# factor lookup for custom units (kip, ksi, psf, kgCO₂e, …) raises KeyError.
 # See: https://painterqubits.github.io/Unitful.jl/stable/extending/
 const _localunits = copy(Unitful.basefactors)
 
+# Snapshot Unitful.promotion similarly. The `@dimension 𝐗` for kgCO₂e adds a
+# new entry to this dict, and without restoration the first promotion involving
+# the new dimension (e.g. constructing `Vector{<:CarbonMass}` from a literal
+# array of `1.0u"kgCO2e"`) raises a KeyError. `@unit` alone does not touch
+# `promotion`, which is why this snapshot is new alongside the basefactors one.
+const _localpromotion = copy(Unitful.promotion)
+
 # US Customary units
 export kip, ksi, psf, ksf, pcf
+
+# Embodied-carbon-equivalent unit (kgCO₂e). Distinct Unitful dimension `𝐗`
+# from structural mass so EC quantities cannot silently merge with mass.
+export kgCO2e, CarbonEquivalent
 
 # Physical constants
 export GRAVITY
@@ -29,10 +40,12 @@ export Length, Area, Volume, SectionModulus
 export SecondMomentOfArea, TorsionalConstant, MomentOfInertia, WarpingConstant
 export Pressure, Force, Moment, Torque
 export LinearLoad, AreaLoadQuantity, Density, Acceleration
+export CarbonMass, CarbonPerMass, CarbonPerArea, CarbonPerVol
 
 # Concrete type aliases (for struct fields)
 export LengthQuantity, AreaQuantity, VolumeQuantity
 export PressureQuantity, ForceQuantity, MomentQuantity, ForcePerLength
+export CarbonMassQuantity, CarbonPerMassQuantity, CarbonPerAreaQuantity, CarbonPerVolQuantity
 
 
 # Unit conversion helpers - US Customary
@@ -110,6 +123,7 @@ export planarize!
 export fixnode!
 
 include("Elements/elements.jl")
+include("Elements/parametricelements.jl")
 include("Elements/K.jl")
 include("Elements/R.jl")
 include("Elements/shell/shell.jl")       # Full shell elements (membrane + bending)
@@ -118,7 +132,7 @@ include("Elements/shell/meshing.jl")     # Shell meshing utilities
 include("Elements/spring.jl")            # Grounded spring elements
 include("Elements/utilities.jl")
 export Element
-export BridgeElement
+export ParametricFrameElement
 export TrussElement
 export Release
 export FixedFixed
@@ -228,9 +242,14 @@ export volume
 
 
 include("Model/preprocessing.jl")
-include("Model/bridgeprocessing.jl")
+include("Model/parametricprocessing.jl")
 include("Model/postprocessing.jl")
 include("Model/analysis.jl")
+# RigidLink defines methods on AbstractModel and calls process!/post_process!,
+# so it must be included after the Model + analysis includes above.
+include("Elements/rigidlink.jl")         # Rigid kinematic-offset links (master/slave reduction)
+export RigidLink
+export rigid_link_transformation
 export process!
 export update!
 export solve!
@@ -325,10 +344,13 @@ export shell_tris_in_region
 
 function __init__()
     merge!(Unitful.basefactors, _localunits)
+    merge!(Unitful.promotion,   _localpromotion)
     Unitful.register(Asap)
-    # Verify custom units survived precompilation → runtime transition.
-    # If this fails, something is deeply wrong with Dict serialisation.
-    for sym in (:Kip, :KipPerSquareInch, :PoundPerSquareFoot, :KipPerSquareFoot, :PoundPerCubicFoot)
+    # Verify custom units (and the new kgCO₂e dimension) survived precompilation
+    # → runtime transition. If this fails, something is deeply wrong with Dict
+    # serialisation.
+    for sym in (:Kip, :KipPerSquareInch, :PoundPerSquareFoot, :KipPerSquareFoot,
+                :PoundPerCubicFoot, :KgCO2e)
         haskey(Unitful.basefactors, sym) && continue
         @error "Asap.__init__: Unitful.basefactors missing :$sym after merge! — unit conversions will fail"
     end

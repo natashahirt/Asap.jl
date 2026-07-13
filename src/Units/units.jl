@@ -34,6 +34,30 @@ Unitful.@unit ksf "ksf" KipPerSquareFoot 1000u"lbf/ft^2" false
 Unitful.@unit pcf "pcf" PoundPerCubicFoot 1u"lb/ft^3" false
 
 # =============================================================================
+# Embodied-Carbon-Equivalent Unit (kgCO₂e)
+# =============================================================================
+# Carbon-equivalent mass is a distinct physical quantity from structural mass.
+# We model it with its own Unitful dimension (𝐗 = "carbon-equivalent") so that
+# the type system refuses to silently sum `kgCO₂e` with `kg`. Derived ratios
+# like `kgCO₂e/kg`, `kgCO₂e/m²`, and `kgCO₂e/m³` arise automatically as new
+# typed quantities.
+#
+# Re-exported by StructuralSizer, StructuralSynthesizer, and StructuralStudies
+# via `@reexport using Asap: kgCO2e, ...`.
+
+"""Embodied-carbon-equivalent mass dimension (`𝐗`). Distinct from the standard
+mass dimension `𝐌` so EC quantities cannot be silently added to structural
+mass. The abstract type alias `CarbonEquivalent` is what `dimension(1.0u"kgCO2e")`
+returns at the type level."""
+Unitful.@dimension 𝐗 "carbon-equivalent" CarbonEquivalent
+
+"""Kilograms of CO₂-equivalent: reference unit of the `𝐗` (carbon-equivalent)
+dimension. ASCII spelling `kgCO2e` is the macro symbol (so `u"kgCO2e"` works);
+the abbreviation `"kgCO₂e"` is what Unitful prints in REPL / log output.
+The `false` flag disables SI-prefix parsing (we never want `MkgCO2e`)."""
+Unitful.@refunit kgCO2e "kgCO₂e" KgCO2e 𝐗 false
+
+# =============================================================================
 # Physical Constants
 # =============================================================================
 
@@ -94,6 +118,18 @@ const Density = Unitful.Quantity{T, Unitful.𝐌*Unitful.𝐋^-3, U} where {T<:R
 """Acceleration quantity (m/s², ft/s², etc.)"""
 const Acceleration = Unitful.Quantity{T, Unitful.𝐋*Unitful.𝐓^-2, U} where {T<:Real, U}
 
+"""Embodied-carbon-equivalent mass quantity (kgCO₂e, etc.) — `𝐗` dimension."""
+const CarbonMass = Unitful.Quantity{T, 𝐗, U} where {T<:Real, U}
+
+"""Embodied-carbon intensity per unit mass (kgCO₂e/kg, etc.) — material ECC factor."""
+const CarbonPerMass = Unitful.Quantity{T, 𝐗/Unitful.𝐌, U} where {T<:Real, U}
+
+"""Embodied-carbon intensity per unit area (kgCO₂e/m², kgCO₂e/ft², etc.)."""
+const CarbonPerArea = Unitful.Quantity{T, 𝐗/Unitful.𝐋^2, U} where {T<:Real, U}
+
+"""Embodied-carbon intensity per unit volume (kgCO₂e/m³, etc.)."""
+const CarbonPerVol = Unitful.Quantity{T, 𝐗/Unitful.𝐋^3, U} where {T<:Real, U}
+
 
 # =============================================================================
 # Concrete Type Aliases (for struct fields with Float64 precision)
@@ -121,6 +157,26 @@ const MomentQuantity = typeof(1.0u"N*m")
 
 """Distributed load in N/m (internal storage)."""
 const ForcePerLength = typeof(1.0u"N/m")
+
+# Note: `u"kgCO2e"` is unresolvable inside this file because Asap hasn't yet
+# been registered with `Unitful.register` (that happens immediately after this
+# include in Asap.jl). We therefore build the concrete types via the bare
+# `kgCO2e` symbol — defined above by `@refunit` — and standard Unitful units.
+
+"""Concrete embodied-carbon-equivalent mass (Float64 kgCO₂e)."""
+const CarbonMassQuantity = typeof(1.0 * kgCO2e)
+
+"""Concrete embodied-carbon per unit mass (Float64 kgCO₂e/kg). Used by every
+material `ecc` field (`Concrete.ecc`, `Metal.ecc`, `Timber.ecc`, etc.)."""
+const CarbonPerMassQuantity = typeof(1.0 * kgCO2e / u"kg")
+
+"""Concrete embodied-carbon per unit area (Float64 kgCO₂e/m²). Used by floor
+intensity fields (`BuildingECResult.ec_per_floor_area`, slab sweep columns)."""
+const CarbonPerAreaQuantity = typeof(1.0 * kgCO2e / u"m^2")
+
+"""Concrete embodied-carbon per unit volume (Float64 kgCO₂e/m³). Used by
+`ECCDistribution` percentile fields and `pf_concrete_ecc`."""
+const CarbonPerVolQuantity = typeof(1.0 * kgCO2e / u"m^3")
 
 
 # =============================================================================
