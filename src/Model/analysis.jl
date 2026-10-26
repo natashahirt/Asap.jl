@@ -546,13 +546,34 @@ end
 # Note: diagonal perturbation (K + ε·diag) was tried but actually degrades
 # solution quality on ill-conditioned systems.  LDLᵀ handles genuine
 # near-singularity better than a perturbed Cholesky.
+#
+# After `update!(; values_only=true)` the old factor is kept but marked stale.
+# If its sparsity-pattern key still matches, it is refactored in place with
+# `cholesky!`, which skips CHOLMOD's symbolic analysis (fill-reducing ordering),
+# the dominant cost for large shell models.
+const _N_FACTORIZATIONS = Ref(0)
+
 function _get_factorization(model::AbstractModel)
-    if model._factorization !== nothing
-        return model._factorization
+    old = model._factorization
+    if old !== nothing && !model._factorization_stale
+        return old
     end
+    _N_FACTORIZATIONS[] += 1
     idx = model.freeDOFs
     K = Symmetric(model.S[idx, idx])
+    key = _factor_pattern_key(model)
+    if old isa SparseArrays.CHOLMOD.Factor && model._factor_key == key && key != 0
+        cholesky!(old, K; check=false)
+        if issuccess(old)
+            model._factorization_stale = false
+            return old
+        end
+    end
+    model._factorization = nothing
+    model._factorization_stale = false
+    model._factor_key = UInt(0)
     fact = cholesky(K; check=false)
+    issuccess(fact) && (model._factor_key = key)
     if !issuccess(fact)
         @warn "Stiffness matrix not SPD — trying LDLᵀ"
         fact = ldlt(K; check=false)
@@ -575,6 +596,16 @@ function _get_factorization(model::AbstractModel)
     end
     model._factorization = fact
     return fact
+end
+
+"""Key identifying the free-DOF sparsity pattern of `model.S` (same `S` object, nnz, and free DOFs)."""
+_factor_pattern_key(model::AbstractModel) =
+    hash((objectid(model.S), nnz(model.S), model.freeDOFs))
+
+"""Mark the cached factorization stale after an in-place, same-pattern change to `S` values."""
+function _invalidate_factor_values!(model::AbstractModel)
+    model._factorization === nothing || (model._factorization_stale = true)
+    return model
 end
 
 # Static - wrapper for existing solve!
@@ -700,7 +731,8 @@ matrix after property or load changes.  Topology must be unchanged
 - `values_only=true`: lightweight update — only recomputes element K
   matrices from current section/material properties and rebuilds P.
   Updates S values **in-place** (same sparsity pattern, avoids COO →
-  sparse reconstruction).  Use when only E, t, ν, I, A, or load
+  sparse reconstruction), and the next solve refactors `S` reusing the
+  previous symbolic analysis.  Use when only E, t, ν, I, A, or load
   magnitudes changed but geometry is unchanged.
 """
 function update!(model::FrameModel; values_only::Bool = false, loads_only::Bool = false)
@@ -718,7 +750,7 @@ function update!(model::FrameModel; values_only::Bool = false, loads_only::Bool 
         end
         populate_loads!(model)
         _update_S_values!(model)
-        model._factorization = nothing
+        _invalidate_factor_values!(model)
     else
         # Full element reprocess + S rebuild
         process_elements!(model)
@@ -745,13 +777,10 @@ function update!(model::Model; values_only::Bool = false, loads_only::Bool = fal
             global_K!(element)
         end
         # Shell global_K! is thread-safe (writes only to per-element fields)
-        shells = model.shell_elements
-        Threads.@threads for i in eachindex(shells)
-            global_K!(shells[i])
-        end
+        _recompute_shell_K!(model.shell_elements)
         populate_loads!(model)
         _update_S_values!(model)
-        model._factorization = nothing
+        _invalidate_factor_values!(model)
     else
         # Full element reprocess + S rebuild
         process_elements!(model)
@@ -770,13 +799,10 @@ function update!(model::ShellModel; values_only::Bool = false, loads_only::Bool 
         populate_loads!(model)
     elseif values_only
         # Shell global_K! is thread-safe (writes only to per-element fields)
-        elems = model.elements
-        Threads.@threads for i in eachindex(elems)
-            global_K!(elems[i])
-        end
+        _recompute_shell_K!(model.elements)
         populate_loads!(model)
         _update_S_values!(model)
-        model._factorization = nothing
+        _invalidate_factor_values!(model)
     else
         process_elements!(model)
         populate_loads!(model)
@@ -797,7 +823,7 @@ function update!(model::TrussModel; values_only::Bool = false, loads_only::Bool 
         end
         populate_loads!(model)
         _update_S_values!(model)
-        model._factorization = nothing
+        _invalidate_factor_values!(model)
     else
         process_elements!(model)
         populate_loads!(model)
@@ -813,60 +839,89 @@ end
 # _update_S_values!  —  in-place stiffness scatter (same sparsity pattern)
 # =============================================================================
 
+"""Recompute every shell `global_K!` on a concretely typed element vector."""
+function _recompute_shell_K!(shells::Vector{Sh}) where {Sh}
+    Threads.@threads for i in eachindex(shells)
+        global_K!(shells[i])
+    end
+    return shells
+end
+
 """
     _update_S_values!(model)
 
 Zero the existing sparse matrix `model.S` and scatter updated element K
 values back into it.  Reuses the CSC sparsity pattern from the initial
 `create_S!` call — avoids COO allocation + `sparse()` reconstruction.
+
+Uses the cached [`_ScatterMap`](@ref) from `create_S!` when it still matches
+`model.S`; otherwise falls back to indexed `S[i, j] +=` writes. Both paths add
+the element contributions in the same order.
 """
-function _update_S_values!(model::FrameModel)
-    fill!(model.S.nzval, 0.0)
-    for element in model.elements
-        idx = element.globalID
-        n = length(idx)
-        @inbounds for i in 1:n, j in 1:n
-            model.S[idx[i], idx[j]] += element.K[i, j]
-        end
+# The element vectors are stored in abstractly typed fields
+# (`Vector{<:FrameElement}`, `Vector{<:ShellElement}`). A barrier on the
+# runtime vector type lets the scatter loop see a concrete `K`.
+_update_S_values!(model::Union{FrameModel, ShellModel, TrussModel}) =
+    _assemble_S!(model, model.elements)
+
+_update_S_values!(model::Model) =
+    _assemble_S!(model, model.frame_elements, model.shell_elements)
+
+function _assemble_S!(model::AbstractModel, elements::Vector{E}) where {E}
+    S = model.S
+    fill!(S.nzval, 0.0)
+    sm = model._scatter
+    n_expected = _coo_length(elements)
+    if sm !== nothing && sm.S === S && sm.nnz == nnz(S) && length(sm.idx) == n_expected
+        _scatter_values!(S.nzval, sm.idx, 0, elements)
+    else
+        _scatter_values_indexed!(S, elements)
     end
+    return S
 end
 
-function _update_S_values!(model::ShellModel)
-    fill!(model.S.nzval, 0.0)
-    for element in model.elements
-        idx = element.globalID
-        n = length(idx)
-        @inbounds for i in 1:n, j in 1:n
-            model.S[idx[i], idx[j]] += element.K[i, j]
-        end
+function _assemble_S!(
+    model::AbstractModel, frames::Vector{F}, shells::Vector{Sh},
+) where {F, Sh}
+    S = model.S
+    fill!(S.nzval, 0.0)
+    sm = model._scatter
+    n_expected = _coo_length(frames) + _coo_length(shells)
+    if sm !== nothing && sm.S === S && sm.nnz == nnz(S) && length(sm.idx) == n_expected
+        # Frames first, then shells: the same order `create_S!` used for the
+        # mixed model, so the scatter-map slots stay aligned.
+        p = _scatter_values!(S.nzval, sm.idx, 0, frames)
+        _scatter_values!(S.nzval, sm.idx, p, shells)
+    else
+        _scatter_values_indexed!(S, frames)
+        _scatter_values_indexed!(S, shells)
     end
+    return S
 end
 
-function _update_S_values!(model::TrussModel)
-    fill!(model.S.nzval, 0.0)
-    for element in model.elements
-        idx = element.globalID
-        n = length(idx)
-        @inbounds for i in 1:n, j in 1:n
-            model.S[idx[i], idx[j]] += element.K[i, j]
+_coo_length(elements::Vector) = sum(e -> length(e.globalID)^2, elements; init = 0)
+
+function _scatter_values!(
+    nzval::Vector{Float64}, idx::Vector{Int}, p::Int, elements::Vector{E},
+) where {E}
+    @inbounds for element in elements
+        K = element.K
+        n = length(element.globalID)
+        for i in 1:n, j in 1:n
+            p += 1
+            nzval[idx[p]] += K[i, j]
         end
     end
+    return p
 end
 
-function _update_S_values!(model::Model)
-    fill!(model.S.nzval, 0.0)
-    for element in model.frame_elements
+function _scatter_values_indexed!(S::SparseMatrixCSC, elements::Vector{E}) where {E}
+    for element in elements
         idx = element.globalID
+        K = element.K
         n = length(idx)
         @inbounds for i in 1:n, j in 1:n
-            model.S[idx[i], idx[j]] += element.K[i, j]
-        end
-    end
-    for element in model.shell_elements
-        idx = element.globalID
-        n = length(idx)
-        @inbounds for i in 1:n, j in 1:n
-            model.S[idx[i], idx[j]] += element.K[i, j]
+            S[idx[i], idx[j]] += K[i, j]
         end
     end
 end

@@ -642,11 +642,28 @@ end
 """
     global_K!(elem::ShellTri3)
 
-Compute and store global stiffness matrix.
+Compute and store global stiffness matrix `K = Rᵀ K_local R`.
+
+`R` is block-diagonal with the same 3×3 rotation `T = R[1:3, 1:3]` on all six
+DOF triples (see `_build_transformation!`), so each 3×3 block is transformed as
+`Tᵀ K_ab T`, written in place into `elem.K`.
 """
 function global_K!(elem::ShellTri3)
-    K_local = local_K(elem)
-    elem.K = elem.R' * K_local * elem.R
+    Kl = local_K(elem)
+    R = elem.R
+    size(elem.K) == (18, 18) || (elem.K = zeros(18, 18))
+    K = elem.K
+    @inbounds for bj in 0:5, bi in 0:5
+        oi = 3bi; oj = 3bj
+        for j in 1:3
+            w1 = Kl[oi+1, oj+1] * R[1, j] + Kl[oi+1, oj+2] * R[2, j] + Kl[oi+1, oj+3] * R[3, j]
+            w2 = Kl[oi+2, oj+1] * R[1, j] + Kl[oi+2, oj+2] * R[2, j] + Kl[oi+2, oj+3] * R[3, j]
+            w3 = Kl[oi+3, oj+1] * R[1, j] + Kl[oi+3, oj+2] * R[2, j] + Kl[oi+3, oj+3] * R[3, j]
+            for i in 1:3
+                K[oi+i, oj+j] = R[1, i] * w1 + R[2, i] * w2 + R[3, i] * w3
+            end
+        end
+    end
     return elem
 end
 

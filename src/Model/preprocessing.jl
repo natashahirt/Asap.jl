@@ -320,15 +320,7 @@ function populate_load!(model::AbstractModel, load::AreaLoad)
         # FEM approach: inline nodal forces — zero allocations
         p = ustrip(u"Pa", load.pressure)
         d1, d2, d3 = load.direction
-        @inbounds for shell in load.shells
-            fpn = p * shell.area / length(shell.nodes)
-            for node in shell.nodes
-                gid = node.globalID
-                model.P[gid[1]] += fpn * d1
-                model.P[gid[2]] += fpn * d2
-                model.P[gid[3]] += fpn * d3
-            end
-        end
+        _accumulate_shell_pressure!(model.P, load.shells, p, d1, d2, d3)
     else
         # Tributary approach: geometry cached, only pressure updated
         if isnothing(load._tributary_loads)
@@ -353,6 +345,25 @@ function populate_load!(model::AbstractModel, load::AreaLoad)
             populate_load!(model, trib_load)
         end
     end
+end
+
+"""
+Add an area load's nodal forces. `shells` is stored as
+`Vector{<:ShellElement}`; the barrier makes `area` and `nodes` concrete.
+"""
+function _accumulate_shell_pressure!(
+    P::Vector{Float64}, shells::Vector{S}, p::Float64, d1::Float64, d2::Float64, d3::Float64,
+) where {S}
+    @inbounds for shell in shells
+        fpn = p * shell.area / length(shell.nodes)
+        for node in shell.nodes
+            gid = node.globalID
+            P[gid[1]] += fpn * d1
+            P[gid[2]] += fpn * d2
+            P[gid[3]] += fpn * d3
+        end
+    end
+    return P
 end
 
 """
@@ -495,6 +506,44 @@ end
 # =============================================================================
 
 """
+    _set_S!(model, I, J, V)
+
+Assemble `model.S` from COO triplets and cache the `nzval` position of every
+triplet so later value-only updates can skip the sparse search.
+"""
+function _set_S!(model::AbstractModel, I::Vector{Int64}, J::Vector{Int64}, V::Vector{Float64})
+    S = sparse(I, J, V, model.nDOFs, model.nDOFs)
+    model.S = S
+    model._scatter = _build_scatter_map(S, I, J)
+    return S
+end
+
+"""
+    _build_scatter_map(S, I, J) -> Union{_ScatterMap, Nothing}
+
+Locate each triplet `(I[p], J[p])` in the CSC structure of `S`. Returns `nothing`
+if any triplet has no stored slot (cannot happen for `sparse(I, J, V)`, which
+keeps numerical zeros, but the in-place path must never write to a wrong slot).
+"""
+function _build_scatter_map(S::SparseMatrixCSC{Float64,Int64}, I::Vector{Int64}, J::Vector{Int64})
+    idx = Vector{Int}(undef, length(I))
+    colptr, rowval = S.colptr, S.rowval
+    ok = Threads.Atomic{Bool}(true)
+    Threads.@threads for p in eachindex(I)
+        @inbounds begin
+            lo, hi = colptr[J[p]], colptr[J[p] + 1] - 1
+            k = searchsortedfirst(view(rowval, lo:hi), I[p]) + lo - 1
+            if k <= hi && rowval[k] == I[p]
+                idx[p] = k
+            else
+                ok[] = false
+            end
+        end
+    end
+    return ok[] ? _ScatterMap(S, nnz(S), idx) : nothing
+end
+
+"""
     create_S!(model::FrameModel)
 
 Assemble the global stiffness matrix S for a frame model.
@@ -517,7 +566,7 @@ function create_S!(model::FrameModel)
         end
     end
 
-    model.S = sparse(I, J, V, model.nDOFs, model.nDOFs)
+    _set_S!(model, I, J, V)
 end
 
 """
@@ -558,7 +607,7 @@ function create_S!(model::ShellModel)
         end
     end
 
-    model.S = sparse(I, J, V, model.nDOFs, model.nDOFs)
+    _set_S!(model, I, J, V)
 end
 
 """
@@ -616,7 +665,7 @@ function create_S!(model::Model)
         end
     end
 
-    model.S = sparse(I, J, V, model.nDOFs, model.nDOFs)
+    _set_S!(model, I, J, V)
 end
 
 """
@@ -642,7 +691,7 @@ function create_S!(model::TrussModel)
         end
     end
 
-    model.S = sparse(I, J, V, model.nDOFs, model.nDOFs)
+    _set_S!(model, I, J, V)
 end
 
 # =============================================================================

@@ -1,6 +1,20 @@
 abstract type AbstractModel end
 abstract type ElementModel <: AbstractModel end  # Models with single .elements field
 
+"""
+    _ScatterMap
+
+Position in `S.nzval` of every element-stiffness entry, in the COO order used by
+`create_S!` (elements in assembly order, then `i` outer / `j` inner). Lets
+`_update_S_values!` re-assemble `S` with direct array adds instead of a sparse
+binary search per entry. Valid only while `model.S === S` and `nnz(S) == nnz`.
+"""
+struct _ScatterMap
+    S::SparseMatrixCSC{Float64,Int64}
+    nnz::Int
+    idx::Vector{Int}
+end
+
 # =============================================================================
 # Shared Model Initialization
 # =============================================================================
@@ -88,6 +102,9 @@ mutable struct FrameModel{E,L} <: ElementModel
     processed::Bool
     _factorization::Union{Nothing, Factorization}  # Cached stiffness factorization
     _elemental_loads::Union{Nothing, Vector{Vector{AbstractLoad}}}  # Lazy cache
+    _scatter::Union{Nothing, _ScatterMap}  # Cached nzval positions for in-place S updates
+    _factorization_stale::Bool  # S values changed in place; refactor reusing the symbolic analysis
+    _factor_key::UInt           # Sparsity-pattern key of `_factorization` (0 = not reusable)
     
     function FrameModel(nodes::Vector{Node}, elements::Vector{E}, loads::Vector{L}) where {E<:FrameElement, L<:AbstractLoad}
         nnodes = length(nodes)
@@ -112,7 +129,10 @@ mutable struct FrameModel{E,L} <: ElementModel
             1e-6,
             false,
             nothing,
-            nothing
+            nothing,
+            nothing,
+            false,
+            UInt(0)
         )
 
         return structure
@@ -148,6 +168,9 @@ mutable struct ShellModel{E<:ShellElement,L<:AbstractLoad} <: ElementModel
     tol::Float64
     processed::Bool
     _factorization::Union{Nothing, Factorization}  # Cached stiffness factorization
+    _scatter::Union{Nothing, _ScatterMap}  # Cached nzval positions for in-place S updates
+    _factorization_stale::Bool  # S values changed in place; refactor reusing the symbolic analysis
+    _factor_key::UInt           # Sparsity-pattern key of `_factorization` (0 = not reusable)
     
     function ShellModel(nodes::Vector{Node}, elements::Vector{E}, loads::Vector{L}) where {E<:ShellElement, L<:AbstractLoad}
         nnodes = length(nodes)
@@ -170,7 +193,10 @@ mutable struct ShellModel{E<:ShellElement,L<:AbstractLoad} <: ElementModel
             0.0,
             1e-6,
             false,
-            nothing
+            nothing,
+            nothing,
+            false,
+            UInt(0)
         )
 
         return structure
@@ -223,6 +249,9 @@ mutable struct Model <: AbstractModel
     processed::Bool
     _factorization::Union{Nothing, Factorization}  # Cached stiffness factorization
     _elemental_loads::Union{Nothing, Vector{Vector{AbstractLoad}}}  # Lazy cache
+    _scatter::Union{Nothing, _ScatterMap}  # Cached nzval positions for in-place S updates
+    _factorization_stale::Bool  # S values changed in place; refactor reusing the symbolic analysis
+    _factor_key::UInt           # Sparsity-pattern key of `_factorization` (0 = not reusable)
     
     # Full constructor: frame + shell elements
     function Model(
@@ -260,7 +289,10 @@ mutable struct Model <: AbstractModel
             1e-6,
             false,
             nothing,
-            nothing
+            nothing,
+            nothing,
+            false,
+            UInt(0)
         )
     end
 end
@@ -461,6 +493,9 @@ mutable struct TrussModel <: ElementModel
     tol::Float64
     processed::Bool
     _factorization::Union{Nothing, Factorization}  # Cached stiffness factorization
+    _scatter::Union{Nothing, _ScatterMap}  # Cached nzval positions for in-place S updates
+    _factorization_stale::Bool  # S values changed in place; refactor reusing the symbolic analysis
+    _factor_key::UInt           # Sparsity-pattern key of `_factorization` (0 = not reusable)
     
     function TrussModel(nodes::Vector{TrussNode}, elements::Vector{TrussElement}, loads::Vector{NodeForce})
         nnodes = length(nodes)
@@ -483,7 +518,10 @@ mutable struct TrussModel <: ElementModel
             0.0,
             1e-6,
             false,
-            nothing
+            nothing,
+            nothing,
+            false,
+            UInt(0)
         )
 
         return structure

@@ -5,6 +5,14 @@ using LinearAlgebra: mul!
 # =============================================================================
 
 """
+    _fixed_Ku(model) -> Vector{Float64}
+
+`(S * u)[fixedDOFs]`. A full sparse mat-vec accumulates each row in the same column
+order as `S[fixedDOFs, :] * u` but avoids extracting the row submatrix on every solve.
+"""
+_fixed_Ku(model::AbstractModel) = (model.S * model.u)[model.fixedDOFs]
+
+"""
     reactions!(model::AbstractModel)
 
 Populate external reaction forces in `model.reactions`
@@ -15,7 +23,7 @@ function reactions!(model::FrameModel)
     else
         model.reactions = zeros(model.nDOFs)
     end
-    model.reactions[model.fixedDOFs] = model.S[model.fixedDOFs, :] * model.u + model.Pf[model.fixedDOFs]
+    model.reactions[model.fixedDOFs] = _fixed_Ku(model) + model.Pf[model.fixedDOFs]
 end
 
 function reactions!(model::ShellModel)
@@ -26,7 +34,7 @@ function reactions!(model::ShellModel)
     end
     # Subtract applied forces at supports: true reaction = K·u − P at fixed DOFs
     # (AreaLoad distributes pressure to ALL nodes, including supports)
-    model.reactions[model.fixedDOFs] = model.S[model.fixedDOFs, :] * model.u - model.P[model.fixedDOFs]
+    model.reactions[model.fixedDOFs] = _fixed_Ku(model) - model.P[model.fixedDOFs]
 end
 
 function reactions!(model::Model)
@@ -35,7 +43,7 @@ function reactions!(model::Model)
     else
         model.reactions = zeros(model.nDOFs)
     end
-    model.reactions[model.fixedDOFs] = model.S[model.fixedDOFs, :] * model.u + model.Pf[model.fixedDOFs]
+    model.reactions[model.fixedDOFs] = _fixed_Ku(model) + model.Pf[model.fixedDOFs]
 end
 
 function reactions!(model::TrussModel)
@@ -44,7 +52,7 @@ function reactions!(model::TrussModel)
     else
         model.reactions = zeros(model.nDOFs)
     end
-    model.reactions[model.fixedDOFs] = model.S[model.fixedDOFs, :] * model.u
+    model.reactions[model.fixedDOFs] = _fixed_Ku(model)
 end
 
 # =============================================================================
