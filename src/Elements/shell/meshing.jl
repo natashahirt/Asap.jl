@@ -10,6 +10,117 @@ Includes structured mesh generation (T3block) adapted from FinEtools.jl (Petr Kr
 import DelaunayTriangulation as DT
 import Meshes
 import Meshes: SimpleMesh, Point, coords
+import Random: MersenneTwister
+
+# DelaunayTriangulation draws from an RNG during constrained insertion and
+# Ruppert refinement. A fresh generator with this seed is passed on every
+# call, so a mesh is a function of its points and does not depend on
+# `Random.default_rng()` or on meshes built earlier in the process.
+const _ASAP_MESH_SEED = 0x41534150
+const _MESH_RNG_CALLS = Ref(0)
+function _mesh_rng()
+    _MESH_RNG_CALLS[] += 1
+    return MersenneTwister(_ASAP_MESH_SEED)
+end
+
+"""
+Exact nearest-neighbor distance. Matches
+
+    minimum(hypot(x - p[1], y - p[2]) for p in pts)
+
+The grid only decides which points to measure. Search starts at the first
+ring that can hold a point, then grows until every unsearched cell is at
+least as far as the best distance already found. A tight cluster keeps a
+cell of 1 so a far query does not walk empty rings.
+"""
+struct _PointGrid
+    originx::Float64
+    originy::Float64
+    cell::Float64
+    buckets::Dict{NTuple{2, Int}, Vector{Int}}
+    pts::Vector{Tuple{Float64, Float64}}
+    imin::Int
+    imax::Int
+    jmin::Int
+    jmax::Int
+end
+
+function _PointGrid(pts::Vector{Tuple{Float64, Float64}})
+    n = length(pts)
+    empty_buckets = Dict{NTuple{2, Int}, Vector{Int}}()
+    n == 0 && return _PointGrid(0.0, 0.0, 1.0, empty_buckets, pts, 0, 0, 0, 0)
+    xmin = ymin = Inf
+    xmax = ymax = -Inf
+    for (x, y) in pts
+        xmin = min(xmin, x); xmax = max(xmax, x)
+        ymin = min(ymin, y); ymax = max(ymax, y)
+    end
+    span = max(xmax - xmin, ymax - ymin)
+    # A coincident cluster (one column, or targets closer than 0.1 mm) uses a
+    # 1 m cell. A cell built from a near-zero span makes the ring index enormous
+    # and the search never reaches the point.
+    cell = span > 1e-4 ? span / max(sqrt(float(n)), 1.0) : 1.0
+    buckets = empty_buckets
+    imin = imax = jmin = jmax = 0
+    for (i, (x, y)) in enumerate(pts)
+        key = (floor(Int, (x - xmin) / cell), floor(Int, (y - ymin) / cell))
+        push!(get!(() -> Int[], buckets, key), i)
+        if i == 1
+            imin = imax = key[1]
+            jmin = jmax = key[2]
+        else
+            imin = min(imin, key[1]); imax = max(imax, key[1])
+            jmin = min(jmin, key[2]); jmax = max(jmax, key[2])
+        end
+    end
+    return _PointGrid(xmin, ymin, cell, buckets, pts, imin, imax, jmin, jmax)
+end
+
+function _consider_bucket!(g::_PointGrid, ix::Int, iy::Int, x::Float64, y::Float64, best::Float64)
+    bucket = get(g.buckets, (ix, iy), nothing)
+    bucket === nothing && return best
+    for i in bucket
+        px, py = g.pts[i]
+        d = hypot(x - px, y - py)
+        d < best && (best = d)
+    end
+    return best
+end
+
+function _min_dist(g::_PointGrid, x::Float64, y::Float64)
+    isempty(g.pts) && return Inf
+    ix = floor(Int, (x - g.originx) / g.cell)
+    iy = floor(Int, (y - g.originy) / g.cell)
+    dx0 = ix < g.imin ? g.imin - ix : ix > g.imax ? ix - g.imax : 0
+    dy0 = iy < g.jmin ? g.jmin - iy : iy > g.jmax ? iy - g.jmax : 0
+    ring = max(dx0, dy0)
+    far = max(
+        max(abs(ix - g.imin), abs(iy - g.jmin)),
+        max(abs(ix - g.imin), abs(iy - g.jmax)),
+        max(abs(ix - g.imax), abs(iy - g.jmin)),
+        max(abs(ix - g.imax), abs(iy - g.jmax)),
+    )
+    best = Inf
+    while ring <= far
+        if ring == 0
+            best = _consider_bucket!(g, ix, iy, x, y, best)
+        else
+            y0 = iy - ring
+            y1 = iy + ring
+            for dx in -ring:ring
+                best = _consider_bucket!(g, ix + dx, y0, x, y, best)
+                best = _consider_bucket!(g, ix + dx, y1, x, y, best)
+            end
+            for dy in (-ring + 1):(ring - 1)
+                best = _consider_bucket!(g, ix - ring, iy + dy, x, y, best)
+                best = _consider_bucket!(g, ix + ring, iy + dy, x, y, best)
+            end
+        end
+        best <= ring * g.cell && return best
+        ring += 1
+    end
+    return best
+end
 
 # ============================================================================
 # Structured Mesh Generation (adapted from FinEtools.jl MeshTriangleModule)
@@ -541,7 +652,7 @@ function Diaphragm(
     all_points, _, _ = _generate_mesh_points_with_supports(boundary_pts, n, _SupportLine[])
     
     boundary_loop = vcat(collect(1:nc), [1])
-    tri = DT.triangulate(all_points; boundary_nodes=[boundary_loop])
+    tri = DT.triangulate(all_points; boundary_nodes=[boundary_loop], rng=_mesh_rng())
     
     # Compute average z
     z_val = sum(ustrip(u"m", node.position[3]) for node in corners) / nc
@@ -777,6 +888,119 @@ function _add_patch_geometry!(
 end
 
 """
+    _add_constrained_line_geometry!(all_points, lines, boundary_pts) -> Set{Tuple{Int,Int}}
+
+Add interior constrained-line polyline vertices to the mesh point list and
+return constrained segment index pairs for `DT.triangulate(...; segments=...)`.
+
+Each entry of `lines` is an **open** polyline `[(x1,y1), (x2,y2), ...]`; segments
+connect consecutive vertices only (no wrap-around edge, unlike `_add_patch_geometry!`
+which closes the polygon). The returned tuples are `(min(a,b), max(a,b))` index
+pairs indexing into `all_points`.
+
+Vertices outside the boundary polygon (and not on its edge) are dropped; the
+polyline is simply broken there (the two segments touching a dropped vertex are
+omitted). Callers must ensure no other mesh point lies on a segment interior, or
+`DT.triangulate` will split the constrained edge at that point.
+"""
+function _add_constrained_line_geometry!(
+    all_points::Vector{Tuple{Float64, Float64}},
+    lines::Vector{Vector{Tuple{Float64, Float64}}},
+    boundary_pts::Vector{Tuple{Float64, Float64}}
+)
+    tol = 1e-6
+    round_coord(x) = round(Int64, x / tol)
+
+    # Build existing-point index for deduplication
+    existing = Dict{Tuple{Int64, Int64}, Int}()
+    for (i, pt) in enumerate(all_points)
+        existing[(round_coord(pt[1]), round_coord(pt[2]))] = i
+    end
+
+    segments = Set{Tuple{Int, Int}}()
+
+    for line in lines
+        # Resolve each vertex to a point index (add if missing & inside/on boundary).
+        # Index 0 is a sentinel for a vertex dropped as outside the domain.
+        vertex_indices = Int[]
+        for v in line
+            key = (round_coord(v[1]), round_coord(v[2]))
+            if haskey(existing, key)
+                push!(vertex_indices, existing[key])
+            elseif _point_inside_polygon(v, boundary_pts) ||
+                   _is_on_boundary_edge(v, boundary_pts, tol)
+                push!(all_points, v)
+                idx = length(all_points)
+                existing[key] = idx
+                push!(vertex_indices, idx)
+            else
+                push!(vertex_indices, 0)
+            end
+        end
+
+        # Constrained segments between consecutive in-domain vertices
+        for i in 1:(length(vertex_indices) - 1)
+            a, b = vertex_indices[i], vertex_indices[i + 1]
+            (a == 0 || b == 0 || a == b) && continue
+            push!(segments, (min(a, b), max(a, b)))
+        end
+    end
+
+    return segments
+end
+
+"""
+    _on_any_constrained_segment_interior(pt, lines, tol) -> Bool
+
+True if `pt` lies on the interior (not within `tol` of a vertex) of any polyline
+segment in `lines`. Used to drop auto-generated mesh points that would otherwise
+force `DT.triangulate` to split a constrained edge.
+"""
+function _on_any_constrained_segment_interior(
+    pt::Tuple{Float64, Float64},
+    lines::Vector{Vector{Tuple{Float64, Float64}}},
+    tol::Float64
+)
+    for line in lines
+        for i in 1:(length(line) - 1)
+            a, b = line[i], line[i + 1]
+            hypot(pt[1] - a[1], pt[2] - a[2]) < tol && continue
+            hypot(pt[1] - b[1], pt[2] - b[2]) < tol && continue
+            _point_on_segment(pt, a, b, tol) && return true
+        end
+    end
+    return false
+end
+
+"""
+    _sample_constrained_line_points(lines, spacing) -> Vector{Tuple{Float64,Float64}}
+
+Sample points along each polyline segment at roughly `spacing` intervals
+(endpoints included). Used as refinement targets so triangle quality stays good
+near constrained edges when Ruppert refinement is active.
+"""
+function _sample_constrained_line_points(
+    lines::Vector{Vector{Tuple{Float64, Float64}}},
+    spacing::Float64
+)
+    pts = Tuple{Float64, Float64}[]
+    spacing <= 0 && return pts
+    for line in lines
+        for i in 1:(length(line) - 1)
+            a, b = line[i], line[i + 1]
+            L = hypot(b[1] - a[1], b[2] - a[2])
+            L < 1e-12 && continue
+            nseg = max(1, ceil(Int, L / spacing))
+            for k in 0:nseg
+                t = k / nseg
+                push!(pts, (a[1] * (1 - t) + b[1] * t, a[2] * (1 - t) + b[2] * t))
+            end
+        end
+    end
+    return pts
+end
+
+"""
     _apply_patches!(shells, patches)
 
 Reassign section properties for shell elements whose centroids lie inside a patch.
@@ -844,7 +1068,7 @@ function mesh(
     
     # Build constrained triangulation
     boundary_loop = vcat(collect(1:nc), [1])
-    return DT.triangulate(all_points; boundary_nodes=[boundary_loop])
+    return DT.triangulate(all_points; boundary_nodes=[boundary_loop], rng=_mesh_rng())
 end
 
 # ============================================================================
@@ -887,6 +1111,13 @@ Create triangular shell elements from any polygon with support conditions.
 - `interior_nodes::Vector{Node}`: Actual Node objects to embed in the mesh. Unlike 
   `interior_supports`, these exact node objects are used (not copies), enabling true 
   structural connectivity with frame elements sharing the same nodes.
+- `interior_constrained_lines::Vector{Vector{NTuple{2, Float64}}}`: Interior polylines
+  (each a sequence of `(x, y)` points, in meters) whose consecutive-vertex edges become
+  **constrained edges** of the Delaunay triangulation. Unlike `interior_supports` (which
+  are sampled as points and given boundary conditions), these guarantee triangle edges
+  align with the polyline — used for joist / framing lines the slab mesh must respect.
+  No boundary conditions are imposed; combine with `interior_nodes` for DOF sharing.
+  Empty by default (behavior identical to before when empty).
 - `edge_support_type::Symbol`: Fixity for edge nodes (default: `:pinned`)
 - `interior_support_type::Symbol`: Fixity for interior support line nodes (default: `:pinned`)
 
@@ -923,6 +1154,7 @@ function Shell(
     interior_supports::Vector = [],
     interior_nodes::Vector{Node} = Node[],
     interior_patches::Vector{ShellPatch} = ShellPatch[],
+    interior_constrained_lines::Vector{Vector{NTuple{2, Float64}}} = Vector{NTuple{2, Float64}}[],
     edge_support_type::Union{Symbol, Vector{Bool}} = :pinned,
     interior_support_type::Union{Symbol, Vector{Bool}} = :pinned,
     target_edge_length::Union{Quantity, Real, Nothing} = nothing,
@@ -995,6 +1227,12 @@ function Shell(
         Tuple{Float64, Float64}[]
     end
     
+    # Refinement targets along constrained polylines so triangle quality stays
+    # acceptable near the constrained edges (only relevant when refinement is on).
+    if h_near !== nothing && !isempty(interior_constrained_lines)
+        append!(refine_pts, _sample_constrained_line_points(interior_constrained_lines, h_near))
+    end
+    
     # ===========================================================================
     # Bounding box
     # ===========================================================================
@@ -1016,7 +1254,9 @@ function Shell(
     # Structured mesh only for uniform rectangular panels (no refinement).
     # When refinement is requested, Delaunay + rings is always better because it
     # refines radially/locally instead of creating axis-aligned dense bands.
-    use_structured = h_far !== nothing && h_near === nothing && _is_rectangular(boundary_pts) && isempty(support_lines) && isempty(interior_nodes) && isempty(interior_patches)
+    # Constrained lines require the Delaunay path (structured T3 meshing cannot
+    # honor arbitrary interior constrained edges), so exclude it here.
+    use_structured = h_far !== nothing && h_near === nothing && _is_rectangular(boundary_pts) && isempty(support_lines) && isempty(interior_nodes) && isempty(interior_patches) && isempty(interior_constrained_lines)
     
     if use_structured
         # ── Structured mesh (T3blockx) ──
@@ -1088,8 +1328,16 @@ function Shell(
                 _add_patch_geometry!(seed_points, interior_patches, boundary_pts)
             end
             
+            # Add constrained-line vertices and collect their segments. Ruppert
+            # refinement may insert Steiner points that subdivide these segments,
+            # but the constrained edges themselves are preserved by DT.
+            line_segments = isempty(interior_constrained_lines) ? Set{Tuple{Int,Int}}() :
+                _add_constrained_line_geometry!(seed_points, interior_constrained_lines, boundary_pts)
+            
             boundary_loop = vcat(collect(1:nc), [1])
-            tri = DT.triangulate(seed_points; boundary_nodes=[boundary_loop])
+            tri = isempty(line_segments) ?
+                DT.triangulate(seed_points; boundary_nodes=[boundary_loop], rng=_mesh_rng()) :
+                DT.triangulate(seed_points; boundary_nodes=[boundary_loop], segments=line_segments, rng=_mesh_rng())
             
             # Ruppert refinement: spatially-varying area constraint
             far_h  = h_far !== nothing ? h_far : max(Lx, Ly) / max(effective_n, 1)
@@ -1097,13 +1345,14 @@ function Shell(
             A_near = 0.433 * h_near^2
             r_transition = r_trans !== nothing ? r_trans : 5.0 * h_near
 
+            refine_grid = _PointGrid(refine_pts)
             function _needs_refine(_tri, T)
                 i, j, k = DT.triangle_vertices(T)
                 p, q, r = DT.get_point(_tri, i, j, k)
                 A = abs(DT.triangle_area(p, q, r))
                 cx = (p[1] + q[1] + r[1]) / 3
                 cy = (p[2] + q[2] + r[2]) / 3
-                d_min = minimum(hypot(cx - t[1], cy - t[2]) for t in refine_pts)
+                d_min = _min_dist(refine_grid, cx, cy)
                 α = clamp(d_min / r_transition, 0.0, 1.0)
                 A_limit = A_near + α * (A_far - A_near)
                 return A > A_limit
@@ -1113,7 +1362,7 @@ function Shell(
             tri_backup = deepcopy(tri)
             try
                 DT.refine!(tri; min_angle=30.0, custom_constraint=_needs_refine,
-                           max_points=max_pts)
+                           max_points=max_pts, rng=_mesh_rng())
             catch e
                 @warn "Ruppert refinement failed — falling back to grid mesh" exception=(e, catch_backtrace())
                 # Fall back to grid-based mesh (Strategy B)
@@ -1166,8 +1415,11 @@ function Shell(
         end
         
         # ── Strategy B: Dense grid mesh (no Ruppert) ──
+        # Pass constrained lines so grid/edge/support points landing on a
+        # constrained segment interior are dropped — otherwise DT would split
+        # the constrained edge at those collinear points.
         all_points, support_point_indices, interior_node_map = _generate_mesh_points_with_supports(
-            boundary_pts, effective_n, support_lines, interior_node_pts)
+            boundary_pts, effective_n, support_lines, interior_node_pts, interior_constrained_lines)
         
         # Add patch vertices as regular mesh points (no constrained segments).
         # _apply_patches! assigns stiffened sections by centroid check, so
@@ -1176,8 +1428,16 @@ function Shell(
             _add_patch_geometry!(all_points, interior_patches, boundary_pts)
         end
         
+        # Add constrained-line vertices and collect their segments for a
+        # constrained Delaunay triangulation. With no interior collinear points
+        # (dropped above), each consecutive-vertex pair survives as a mesh edge.
+        line_segments = isempty(interior_constrained_lines) ? Set{Tuple{Int,Int}}() :
+            _add_constrained_line_geometry!(all_points, interior_constrained_lines, boundary_pts)
+        
         boundary_loop = vcat(collect(1:nc), [1])
-        tri = DT.triangulate(all_points; boundary_nodes=[boundary_loop])
+        tri = isempty(line_segments) ?
+            DT.triangulate(all_points; boundary_nodes=[boundary_loop], rng=_mesh_rng()) :
+            DT.triangulate(all_points; boundary_nodes=[boundary_loop], segments=line_segments, rng=_mesh_rng())
         
         z_val = sum(ustrip(u"m", node.position[3]) for node in corners) / nc
         
@@ -1235,6 +1495,7 @@ function Shell(
     interior_supports::Vector = [],
     interior_nodes::Vector{Node} = Node[],
     interior_patches::Vector{ShellPatch} = ShellPatch[],
+    interior_constrained_lines::Vector{Vector{NTuple{2, Float64}}} = Vector{NTuple{2, Float64}}[],
     edge_support_type::Union{Symbol, Vector{Bool}} = :pinned,
     interior_support_type::Union{Symbol, Vector{Bool}} = :pinned,
     target_edge_length::Union{Quantity, Real, Nothing} = 0.25u"m",
@@ -1248,6 +1509,7 @@ function Shell(
         interior_supports=interior_supports,
         interior_nodes=interior_nodes,
         interior_patches=interior_patches,
+        interior_constrained_lines=interior_constrained_lines,
         edge_support_type=edge_support_type,
         interior_support_type=interior_support_type,
         target_edge_length=target_edge_length,
@@ -1805,13 +2067,20 @@ function _generate_mesh_points_with_supports(
     boundary_pts::Vector{Tuple{Float64, Float64}}, 
     n::Int,
     support_lines::Vector{_SupportLine},
-    interior_node_pts::Vector{Tuple{Float64, Float64}} = Tuple{Float64, Float64}[]
+    interior_node_pts::Vector{Tuple{Float64, Float64}} = Tuple{Float64, Float64}[],
+    constrained_lines::Vector{Vector{Tuple{Float64, Float64}}} = Vector{Tuple{Float64, Float64}}[]
 )
     nc = length(boundary_pts)
     
     # Tolerance for deduplication (in meters)
     tol = 1e-6
     round_coord(x) = round(Int64, x / tol)
+    
+    # Auto-generated points (grid, edge subdivisions, support samples) that land
+    # on a constrained-line segment interior must be dropped, or DT would split
+    # the constrained edge there. Boundary corners and interior nodes are exempt.
+    _excluded(pt) = !isempty(constrained_lines) &&
+        _on_any_constrained_segment_interior(pt, constrained_lines, tol)
     
     # Use a dict to dedupe: key is rounded coords, value is (exact coords, is_support, interior_node_idx)
     # interior_node_idx=0 means not an interior node
@@ -1839,7 +2108,7 @@ function _generate_mesh_points_with_supports(
         line_pts = _points_along_line(line.start_pt, line.end_pt, n)
         for pt in line_pts
             key = (round_coord(pt[1]), round_coord(pt[2]))
-            if !haskey(points_dict, key)
+            if !haskey(points_dict, key) && !_excluded(pt)
                 # Only add if inside polygon
                 if _point_inside_polygon(pt, boundary_pts) || _is_on_boundary_edge(pt, boundary_pts, tol)
                     points_dict[key] = (pt, true, 0)  # Mark as support point
@@ -1889,7 +2158,7 @@ function _generate_mesh_points_with_supports(
             t = k / n
             pt = (p1[1] * (1-t) + p2[1] * t, p1[2] * (1-t) + p2[2] * t)
             key = (round_coord(pt[1]), round_coord(pt[2]))
-            if !haskey(points_dict, key)
+            if !haskey(points_dict, key) && !_excluded(pt)
                 points_dict[key] = (pt, false, 0)
             end
         end
@@ -1902,7 +2171,7 @@ function _generate_mesh_points_with_supports(
             y = ymin + j * dy
             pt = (x, y)
             
-            if _point_inside_polygon(pt, boundary_pts)
+            if _point_inside_polygon(pt, boundary_pts) && !_excluded(pt)
                 key = (round_coord(pt[1]), round_coord(pt[2]))
                 if !haskey(points_dict, key)
                     points_dict[key] = (pt, false, 0)
@@ -2339,20 +2608,21 @@ function VaultShell(
         end
         
         boundary_loop = vcat(collect(1:nc), [1])
-        tri = DT.triangulate(seed_points; boundary_nodes=[boundary_loop])
+        tri = DT.triangulate(seed_points; boundary_nodes=[boundary_loop], rng=_mesh_rng())
         
         far_h  = h_far !== nothing ? h_far : max(Lx, Ly) / max(effective_n, 1)
         A_far  = 0.433 * far_h^2
         A_near = 0.433 * h_near^2
         r_transition = r_trans !== nothing ? r_trans : 5.0 * h_near
 
+        refine_grid = _PointGrid(refine_pts)
         function _needs_refine(_tri, T)
             i, j, k = DT.triangle_vertices(T)
             p, q, r = DT.get_point(_tri, i, j, k)
             A = abs(DT.triangle_area(p, q, r))
             tcx = (p[1] + q[1] + r[1]) / 3
             tcy = (p[2] + q[2] + r[2]) / 3
-            d_min = isempty(refine_pts) ? Inf : minimum(hypot(tcx - t[1], tcy - t[2]) for t in refine_pts)
+            d_min = _min_dist(refine_grid, tcx, tcy)
             α = clamp(d_min / r_transition, 0.0, 1.0)
             A_limit = A_near + α * (A_far - A_near)
             return A > A_limit
@@ -2360,7 +2630,8 @@ function VaultShell(
 
         max_pts = max(5000, 20 * length(seed_points))
         try
-            DT.refine!(tri; min_angle=30.0, custom_constraint=_needs_refine, max_points=max_pts)
+            DT.refine!(tri; min_angle=30.0, custom_constraint=_needs_refine,
+                       max_points=max_pts, rng=_mesh_rng())
         catch e
             @warn "VaultShell Ruppert refinement failed — falling back to grid mesh" exception=(e, catch_backtrace())
             tri = nothing
@@ -2378,7 +2649,7 @@ function VaultShell(
         boundary_pts, effective_n, _SupportLine[], interior_node_pts)
     
     boundary_loop = vcat(collect(1:nc), [1])
-    tri = DT.triangulate(all_points; boundary_nodes=[boundary_loop])
+    tri = DT.triangulate(all_points; boundary_nodes=[boundary_loop], rng=_mesh_rng())
     
     return _create_vault_shells_from_tri(tri, corners, interior_nodes, interior_node_map,
                                           boundary_pts, corner_map, section, id,
@@ -2541,7 +2812,7 @@ function get_vault_mesh_data(
     
     # Triangulate
     boundary_loop = vcat(collect(1:nc), [1])
-    tri = DT.triangulate(all_points; boundary_nodes=[boundary_loop])
+    tri = DT.triangulate(all_points; boundary_nodes=[boundary_loop], rng=_mesh_rng())
     
     # Extract vertices (projected to vault surface) and faces
     points = DT.get_points(tri)
