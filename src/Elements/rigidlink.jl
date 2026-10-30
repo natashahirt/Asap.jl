@@ -30,7 +30,7 @@ connections at offsets (via the per-DOF release vector).
 =#
 
 using LinearAlgebra: I, dot, Symmetric, cholesky, ldlt, lu, issuccess
-using SparseArrays: sparse, SparseMatrixCSC
+using SparseArrays: sparse, SparseMatrixCSC, rowvals, nonzeros
 
 """
     RigidLink(nodeA, nodeB; release=(false,false,false,false,false,false), id=:rigidlink)
@@ -252,10 +252,19 @@ displacement vector, slaves included (`u = G u_retained`), in metres.
 Does not write `model.u`, `model.P`, or `model._factorization`, and does not
 post-process. An empty link set, or a link set that ties nothing, uses
 [`solve(model, cases)`](@ref) on the unreduced stiffness.
+
+`geometric_stiffness`, when given, is an `nDOFs × nDOFs` symmetric matrix
+added to the elastic stiffness before the reduction: the solve is on
+`Gᵀ (S + K_G) G`. It is signed, so a story in compression passes a negative
+`K_G` (Wilson & Habibullah 1987, Eq. 2: `K* = K − L`). It must not touch a
+tied slave DOF; the caller puts story terms on the masters. The returned
+displacements then satisfy equilibrium in the deformed position, and element
+forces recovered as `K_e u_e` carry the second-order actions.
 """
 function solve(model::Model,
                cases::Vector{<:Vector{<:AbstractLoad}},
-               links::AbstractVector{RigidLink})
+               links::AbstractVector{RigidLink};
+               geometric_stiffness::Union{Nothing, AbstractMatrix} = nothing)
     model.processed || process!(model)
     ncases = length(cases)
     ncases == 0 && return Vector{Float64}[]
@@ -265,16 +274,30 @@ function solve(model::Model,
         normalized[j] = Vector{AbstractLoad}(cases[j])
     end
 
-    if isempty(links)
+    if geometric_stiffness === nothing && isempty(links)
         return solve(model, normalized)
     end
 
     G, dependent = _build_rigidlink_reduction(model, links)
-    if isempty(dependent)
+    if geometric_stiffness === nothing && isempty(dependent)
         return solve(model, normalized)
     end
 
     S = model.S
+    if geometric_stiffness !== nothing
+        size(geometric_stiffness) == size(S) || throw(DimensionMismatch(
+            "geometric_stiffness is $(size(geometric_stiffness)); the model has $(size(S))."))
+        Kg = sparse(geometric_stiffness)
+        depset = Set(dependent)
+        rows = rowvals(Kg)
+        vals = nonzeros(Kg)
+        for k in eachindex(rows)
+            (vals[k] != 0 && rows[k] in depset) && throw(ArgumentError(
+                "geometric_stiffness has terms on tied slave DOF $(rows[k]). " *
+                "Put story terms on the master."))
+        end
+        S = S + Kg
+    end
     Gt = transpose(G)
     Sc = Gt * S * G
     retained_free = setdiff(model.freeDOFs, dependent)
