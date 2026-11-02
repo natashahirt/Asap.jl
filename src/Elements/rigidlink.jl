@@ -239,8 +239,27 @@ function solve!(model::AbstractModel, links::AbstractVector{RigidLink};
     return model
 end
 
+"""Degrees of freedom that belong to a shell node and to no frame element."""
+function _shell_only_dofs(model::Model)
+    frame_ids = Set{UInt}()
+    for el in model.frame_elements
+        push!(frame_ids, objectid(el.nodeStart), objectid(el.nodeEnd))
+    end
+    dofs = Int[]
+    seen = Set{UInt}()
+    for el in model.shell_elements
+        for nd in el.nodes
+            id = objectid(nd)
+            (id in frame_ids || id in seen) && continue
+            push!(seen, id)
+            append!(dofs, nd.globalID)
+        end
+    end
+    return dofs
+end
+
 """
-    solve(model, cases, links) -> Vector{Vector{Float64}}
+    solve(model, cases, links; geometric_stiffness=nothing, exclude_shells=false) -> Vector{Vector{Float64}}
 
 Non-mutating multi-case solve on the rigid-link reduced system.
 
@@ -260,11 +279,16 @@ added to the elastic stiffness before the reduction: the solve is on
 tied slave DOF; the caller puts story terms on the masters. The returned
 displacements then satisfy equilibrium in the deformed position, and element
 forces recovered as `K_e u_e` carry the second-order actions.
+
+`exclude_shells` subtracts the shell stiffness and holds every degree of
+freedom that only a shell touches. Diaphragm slaves stay tied. The numbering
+does not change.
 """
 function solve(model::Model,
                cases::Vector{<:Vector{<:AbstractLoad}},
                links::AbstractVector{RigidLink};
-               geometric_stiffness::Union{Nothing, AbstractMatrix} = nothing)
+               geometric_stiffness::Union{Nothing, AbstractMatrix} = nothing,
+               exclude_shells::Bool = false)
     model.processed || process!(model)
     ncases = length(cases)
     ncases == 0 && return Vector{Float64}[]
@@ -274,16 +298,24 @@ function solve(model::Model,
         normalized[j] = Vector{AbstractLoad}(cases[j])
     end
 
-    if geometric_stiffness === nothing && isempty(links)
+    if !exclude_shells && geometric_stiffness === nothing && isempty(links)
         return solve(model, normalized)
     end
 
     G, dependent = _build_rigidlink_reduction(model, links)
-    if geometric_stiffness === nothing && isempty(dependent)
+    if !exclude_shells && geometric_stiffness === nothing && isempty(dependent)
         return solve(model, normalized)
     end
 
     S = model.S
+    # Drop the shell stiffness and hold shell-only nodes. The node numbering
+    # stays the one process! already wrote, so a frame-only displacement lines
+    # up with a displacement of the full model. A shell node tied to a rigid
+    # diaphragm stays a slave: it adds no stiffness once the shells are gone.
+    if exclude_shells && !isempty(model.shell_elements)
+        S = S - assemble_stiffness(model.shell_elements, model.nDOFs)
+    end
+    held = exclude_shells ? setdiff(_shell_only_dofs(model), dependent) : Int[]
     if geometric_stiffness !== nothing
         size(geometric_stiffness) == size(S) || throw(DimensionMismatch(
             "geometric_stiffness is $(size(geometric_stiffness)); the model has $(size(S))."))
@@ -300,7 +332,7 @@ function solve(model::Model,
     end
     Gt = transpose(G)
     Sc = Gt * S * G
-    retained_free = setdiff(model.freeDOFs, dependent)
+    retained_free = setdiff(model.freeDOFs, dependent, held)
     Krr = Symmetric(Sc[retained_free, retained_free])
     fact = cholesky(Krr; check = false)
     if !issuccess(fact)
