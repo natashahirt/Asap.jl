@@ -383,3 +383,85 @@ function _fem_triangular_partial(L::Float64, a::Float64, b::Float64, w_peak::Flo
     
     return (R_A=R_A, R_B=R_B, M_A=M_A, M_B=M_B)
 end
+
+# =============================================================================
+# Quadratic distributed load
+# =============================================================================
+
+"""Gauss–Legendre nodes and weights on `[-1, 1]`. Three points integrate a
+polynomial of degree ≤ 5 exactly."""
+const _GAUSS3_ξ = (-sqrt(0.6), 0.0, sqrt(0.6))
+const _GAUSS3_W = (5 / 9, 8 / 9, 5 / 9)
+
+"""
+    fem_quadratic_segment(L, a, b, w0, w1, w2) -> (R_A, R_B, M_A, M_B)
+
+Fixed-end forces for a load on `[a, b]` of a member of length `L` (metres,
+newtons per metre):
+
+    w(x) = w0 + w1 τ + w2 τ²,    τ = (x - a) / (b - a)
+
+`R_A` and `R_B` are the end shears. `M_A` is counterclockwise at the start
+and `M_B` clockwise at the end, the same sign convention as the uniform
+partial-span forces above.
+
+The integrands are polynomials of degree at most 5, so three-point
+Gauss–Legendre is exact. `w1 == w2 == 0` is a uniform load.
+"""
+function fem_quadratic_segment(L::Float64, a::Float64, b::Float64,
+                               w0::Float64, w1::Float64, w2::Float64)
+    ℓ = b - a
+    (ℓ < 1e-12 || L < 1e-12) && return (R_A=0.0, R_B=0.0, M_A=0.0, M_B=0.0)
+    L2 = L^2
+    L3 = L^3
+    half = 0.5 * ℓ
+    mid = 0.5 * (a + b)
+    R_A = R_B = M_A = M_B = 0.0
+    @inbounds for k in 1:3
+        x = mid + half * _GAUSS3_ξ[k]
+        τ = (x - a) / ℓ
+        w = w0 + w1 * τ + w2 * τ * τ
+        dw = _GAUSS3_W[k] * half * w
+        R_A += dw * (L3 - 3 * L * x^2 + 2 * x^3) / L3
+        R_B += dw * (3 * L * x^2 - 2 * x^3) / L3
+        M_A += dw * (-(x * (L - x)^2) / L2)
+        M_B += dw * (x^2 * (L - x) / L2)
+    end
+    return (R_A=R_A, R_B=R_B, M_A=M_A, M_B=M_B)
+end
+
+"""
+Accumulate fixed-end forces for
+
+    w(x) = w0 + w1 τ + w2 τ²,    τ = (x - a) / (b - a),    a = s_a L,  b = s_b L
+
+into `fem`, with the same layout and direction factors as
+[`_fem_linear_segment!`](@ref). A zero quadratic coefficient reproduces a
+linear segment.
+"""
+function _fem_quadratic_segment!(fem::Vector{Float64},
+                                 L::Float64, s_a::Float64, s_b::Float64,
+                                 w0::Float64, w1::Float64, w2::Float64,
+                                 px::Float64, py::Float64, pz::Float64)
+    a = s_a * L
+    b = s_b * L
+    R = fem_quadratic_segment(L, a, b, w0, w1, w2)
+    R_A = R.R_A
+    R_B = R.R_B
+    M_A = R.M_A
+    M_B = R.M_B
+    half_total = px * (R_A + R_B) / 2
+    @inbounds begin
+        fem[1]  += half_total
+        fem[7]  += half_total
+        fem[2]  += py * R_A
+        fem[8]  += py * R_B
+        fem[6]  += py * M_A
+        fem[12] += py * M_B
+        fem[3]  += pz * R_A
+        fem[9]  += pz * R_B
+        fem[5]  += -pz * M_A
+        fem[11] += -pz * M_B
+    end
+    return fem
+end

@@ -101,6 +101,16 @@ Cell depth fields (perpendicular distance to CELL boundary, for EFM l2 calculati
 - `l2_stiff`: Stiffness-consistent effective width via cubic mean (m) - PRIMARY for EFM
 - `cell_depth_max`: Maximum perpendicular depth (quick accessor for max span)
 - `cell_depth_s_max`: Parametric position where max depth occurs
+
+Load profile (what the edge carries):
+- `profile_s`: Positions along the edge, nondecreasing from 0 to 1. A repeated
+  position is a step.
+- `profile_w`: Tributary width at each position (m), piecewise linear between
+  positions. `∫ w ds × edge length = area` exactly.
+
+The partition writes the profile. The `(s, d)` outline is for drawing, flange
+widths, and strips; it is not a load profile. A one-way strip reaches a skewed
+edge at an angle, so its outline is not a width over the edge.
 """
 struct TributaryPolygon
     local_edge_idx::Int
@@ -114,6 +124,23 @@ struct TributaryPolygon
     l2_stiff::Float64               # cubic mean effective width (m)
     cell_depth_max::Float64         # max depth for quick access
     cell_depth_s_max::Float64       # s position of max
+    profile_s::Vector{Float64}
+    profile_w::Vector{Float64}
+end
+
+"""
+Outline-only constructor. The profile is the outline sliced across the edge,
+which is the load profile when every slice starts on the edge: two-way faces,
+and hand-built test polygons.
+"""
+function TributaryPolygon(local_edge_idx::Int, s::Vector{Float64}, d::Vector{Float64},
+                          area::Float64, fraction::Float64,
+                          cell_depths_s::Vector{Float64}, cell_depths::Vector{Float64},
+                          l2_stiff::Float64, cell_depth_max::Float64, cell_depth_s_max::Float64)
+    ps, pw = _outline_profile(s, d)
+    TributaryPolygon(local_edge_idx, s, d, area, fraction,
+                     cell_depths_s, cell_depths, l2_stiff, cell_depth_max, cell_depth_s_max,
+                     ps, pw)
 end
 
 # Constructor with default cell depths (for backwards compatibility)
@@ -121,6 +148,232 @@ function TributaryPolygon(local_edge_idx::Int, s::Vector{Float64}, d::Vector{Flo
                           area::Float64, fraction::Float64)
     TributaryPolygon(local_edge_idx, s, d, area, fraction, 
                      Float64[], Float64[], 0.0, 0.0, 0.0)
+end
+
+"""The same tributary with `fraction` replaced."""
+_with_fraction(t::TributaryPolygon, f::Float64) =
+    TributaryPolygon(t.local_edge_idx, t.s, t.d, t.area, f,
+                     t.cell_depths_s, t.cell_depths, t.l2_stiff, t.cell_depth_max,
+                     t.cell_depth_s_max, t.profile_s, t.profile_w)
+
+"""Area under a tributary's load profile for an edge of length `edge_len` (m²)."""
+function profile_area(trib::TributaryPolygon, edge_len::Real)
+    return _trapezoid(trib.profile_s, trib.profile_w) * edge_len
+end
+
+"""`∫ w ds` over a piecewise-linear profile."""
+function _trapezoid(pos::Vector{Float64}, w::Vector{Float64})
+    acc = 0.0
+    @inbounds for i in 1:(length(pos) - 1)
+        acc += (w[i] + w[i + 1]) * 0.5 * (pos[i + 1] - pos[i])
+    end
+    return acc
+end
+
+"""Profile of an `(s, d)` outline: its slice length across the edge, on `s ∈ [0, 1]`."""
+function _outline_profile(s::Vector{Float64}, d::Vector{Float64})
+    isempty(s) && return ([0.0, 1.0], [0.0, 0.0])
+    poly = NTuple{2,Float64}[(s[i], d[i]) for i in eachindex(s)]
+    pos, w, _ = _edge_slice_profile(poly, Vector{NTuple{2,Float64}}[])
+    return pos, w
+end
+
+# =============================================================================
+# Slicing: exact width of a region along lines x = const
+# =============================================================================
+
+"""Intervals of the line `x = x0` inside the polygon `poly`, sorted (lo, hi)."""
+function _vertical_intervals(poly::Vector{NTuple{2,Float64}}, x0::Float64)
+    ys = Float64[]
+    n = length(poly)
+    @inbounds for i in 1:n
+        x1, y1 = poly[i]
+        x2, y2 = poly[mod1(i + 1, n)]
+        if (x1 <= x0 < x2) || (x2 <= x0 < x1)
+            push!(ys, y1 + (x0 - x1) * (y2 - y1) / (x2 - x1))
+        end
+    end
+    sort!(ys)
+    return [(ys[k], ys[k + 1]) for k in 1:2:(length(ys) - 1)]
+end
+
+"""Length of `x = x0` inside `poly` and outside every hole. Holes do not overlap each other."""
+function _slice_length(poly, holes, x0::Float64)
+    outer = _vertical_intervals(poly, x0)
+    total = 0.0
+    for (a, b) in outer
+        total += b - a
+    end
+    for h in holes, (c, d) in _vertical_intervals(h, x0), (a, b) in outer
+        total -= max(0.0, min(b, d) - max(a, c))
+    end
+    return max(total, 0.0)
+end
+
+"""x of every proper crossing between an edge of `p` and an edge of `q`."""
+function _crossing_xs(p::Vector{NTuple{2,Float64}}, q::Vector{NTuple{2,Float64}})
+    xs = Float64[]
+    np, nq = length(p), length(q)
+    for i in 1:np
+        a = p[i]
+        b = p[mod1(i + 1, np)]
+        r = (b[1] - a[1], b[2] - a[2])
+        for j in 1:nq
+            c = q[j]
+            d = q[mod1(j + 1, nq)]
+            s = (d[1] - c[1], d[2] - c[2])
+            den = r[1] * s[2] - r[2] * s[1]
+            abs(den) < 1e-15 && continue
+            w = (c[1] - a[1], c[2] - a[2])
+            t = (w[1] * s[2] - w[2] * s[1]) / den
+            u = (w[1] * r[2] - w[2] * r[1]) / den
+            (0.0 <= t <= 1.0 && 0.0 <= u <= 1.0) && push!(xs, a[1] + t * r[1])
+        end
+    end
+    return xs
+end
+
+"""
+    _slice_profile(poly, holes, lo, hi) -> (positions, widths, inside, total, outside)
+
+Width of `poly` minus `holes` along each line `x = const`, as an exact
+piecewise-linear profile on `[lo, hi]`.
+
+Between consecutive vertex and crossing abscissae the same edges cross every
+slice, so the width is linear there. Each piece is sampled at its thirds and
+extended to its ends, which gives the one-sided values at a step. `inside` is
+`∫ width dx` over `[lo, hi]`; `total` is over the whole region. `outside`
+holds the `(a, wa, b, wb)` pieces beyond `[lo, hi]`.
+"""
+function _slice_profile(poly::Vector{NTuple{2,Float64}},
+                        holes::Vector{Vector{NTuple{2,Float64}}},
+                        lo::Float64, hi::Float64)
+    xs = Float64[lo, hi]
+    for p in poly
+        push!(xs, p[1])
+    end
+    for h in holes
+        for p in h
+            push!(xs, p[1])
+        end
+        append!(xs, _crossing_xs(poly, h))
+    end
+    sort!(xs)
+    pos = Float64[]
+    w = Float64[]
+    outside = NTuple{4,Float64}[]
+    inside = 0.0
+    total = 0.0
+    for k in 1:(length(xs) - 1)
+        a, b = xs[k], xs[k + 1]
+        Δ = b - a
+        Δ < 1e-12 && continue
+        f1 = _slice_length(poly, holes, a + Δ / 3)
+        f2 = _slice_length(poly, holes, a + 2Δ / 3)
+        fa = max(0.0, 2 * f1 - f2)
+        fb = max(0.0, 2 * f2 - f1)
+        piece = 0.5 * (fa + fb) * Δ
+        total += piece
+        if !(a >= lo - 1e-12 && b <= hi + 1e-12)
+            piece > 0 && push!(outside, (a, fa, b, fb))
+            continue
+        end
+        inside += piece
+        if !isempty(pos) && pos[end] == a && w[end] == fa
+            push!(pos, b)
+            push!(w, fb)
+        else
+            push!(pos, a, b)
+            push!(w, fa, fb)
+        end
+    end
+    if isempty(pos)
+        return ([lo, hi], [0.0, 0.0], 0.0, total, outside)
+    end
+    pos[1] > lo && (pushfirst!(pos, lo, pos[1]); pushfirst!(w, 0.0, 0.0))
+    pos[end] < hi && (push!(pos, pos[end], hi); push!(w, 0.0, 0.0))
+    pos[1] = lo
+    pos[end] = hi
+    return pos, w, inside, total, outside
+end
+
+"""
+    _edge_slice_profile(poly, holes) -> (positions, widths, area)
+
+[`_slice_profile`](@ref) of a region in its edge's frame, on `[0, 1]`. A part
+past an end is mirrored back onto the edge about that end: a straight-skeleton
+region runs past its edge at a re-entrant corner, and that load belongs at the
+corner, so it stays on this edge beside the support. `area` is the whole
+region's `∫ width ds`.
+"""
+function _edge_slice_profile(poly::Vector{NTuple{2,Float64}},
+                             holes::Vector{Vector{NTuple{2,Float64}}})
+    pos, w, _, total, outside = _slice_profile(poly, holes, 0.0, 1.0)
+    isempty(outside) && return pos, w, total
+    profiles = [(pos, w)]
+    for (a, fa, b, fb) in outside
+        a2, fa2, b2, fb2 = b <= 0.0 ? (-b, fb, -a, fa) : (2.0 - b, fb, 2.0 - a, fa)
+        a2, b2 = clamp(a2, 0.0, 1.0), clamp(b2, 0.0, 1.0)
+        push!(profiles, ([0.0, a2, a2, b2, b2, 1.0], [0.0, 0.0, fa2, fb2, 0.0, 0.0]))
+    end
+    p, ww = _sum_profiles(profiles)
+    return p, ww, total
+end
+
+"""
+    _sum_profiles(profiles) -> (positions, widths)
+
+Sum piecewise-linear profiles on the union of their positions. A repeated
+position is a step; the sum keeps both sides of every step.
+"""
+function _sum_profiles(profiles::Vector{Tuple{Vector{Float64}, Vector{Float64}}})
+    length(profiles) == 1 && return profiles[1]
+    breaks = sort!(unique!(reduce(vcat, (p for (p, _) in profiles))))
+    pos = Float64[]
+    w = Float64[]
+    for s in breaks
+        l = sum(_profile_limit(p, ww, s, true) for (p, ww) in profiles)
+        r = sum(_profile_limit(p, ww, s, false) for (p, ww) in profiles)
+        push!(pos, s)
+        push!(w, l)
+        if r != l
+            push!(pos, s)
+            push!(w, r)
+        end
+    end
+    return pos, w
+end
+
+"""Value of a profile just before (`left = true`) or just after `s`."""
+function _profile_limit(pos::Vector{Float64}, w::Vector{Float64}, s::Float64, left::Bool)
+    n = length(pos)
+    if left
+        i = searchsortedfirst(pos, s)
+        i > n && return w[end]
+        (pos[i] == s || i == 1) && return w[i]
+        return w[i - 1] + (w[i] - w[i - 1]) * (s - pos[i - 1]) / (pos[i] - pos[i - 1])
+    end
+    i = searchsortedlast(pos, s)
+    i < 1 && return w[1]
+    (pos[i] == s || i == n) && return w[i]
+    return w[i] + (w[i + 1] - w[i]) * (s - pos[i]) / (pos[i + 1] - pos[i])
+end
+
+"""Plan area of `outer` minus the parts of `holes` inside it (m²)."""
+function _net_area(outer::Vector{NTuple{2,Float64}}, holes::Vector{Vector{NTuple{2,Float64}}})
+    lo = minimum(p[1] for p in outer)
+    hi = maximum(p[1] for p in outer)
+    _, _, inside, _, _ = _slice_profile(outer, holes, lo, hi)
+    return inside
+end
+
+"""`pts` in the frame of edge `a → b`: `s` from 0 at `a` to 1 at `b`, `d` in meters to the left."""
+function _to_edge_frame(pts::Vector{NTuple{2,Float64}}, a::NTuple{2,Float64}, b::NTuple{2,Float64})
+    ex, ey = b[1] - a[1], b[2] - a[2]
+    L = hypot(ex, ey)
+    tx, ty = ex / L, ey / L
+    return NTuple{2,Float64}[(((p[1] - a[1]) * tx + (p[2] - a[2]) * ty) / L,
+                              -(p[1] - a[1]) * ty + (p[2] - a[2]) * tx) for p in pts]
 end
 
 """
@@ -450,17 +703,37 @@ end
 Create TributaryPolygon with cell depth values computed.
 
 This version computes the cell boundary depths (for EFM l2 calculation).
+
+`profile` is the edge's exact `(positions, widths)` when the partition knows
+it (one-way). Otherwise the region `verts` minus `holes` is sliced across the
+edge ([`_edge_slice_profile`](@ref)), and with holes `area` is replaced by that
+net area.
 """
 function _make_tributary_with_depths(edge_idx::Int, verts::Vector{NTuple{2,Float64}}, 
                                      original_pts::Vector{NTuple{2,Float64}}, area::Float64, 
-                                     frac::Float64)::TributaryPolygon
+                                     frac::Float64;
+                                     profile = nothing,
+                                     holes::Vector{Vector{NTuple{2,Float64}}} = Vector{NTuple{2,Float64}}[]
+                                     )::TributaryPolygon
     n = length(original_pts)
+    a = original_pts[edge_idx]
+    b = original_pts[mod1(edge_idx + 1, n)]
     
     # Compute parametric representation
     if isempty(verts)
         s, d = Float64[], Float64[]
     else
-        s, d = _to_parametric(verts, original_pts[edge_idx], original_pts[mod1(edge_idx + 1, n)])
+        s, d = _to_parametric(verts, a, b)
+    end
+
+    if profile !== nothing
+        ps, pw = profile
+    elseif isempty(verts)
+        ps, pw = [0.0, 1.0], [0.0, 0.0]
+    else
+        frame_holes = [_to_edge_frame(h, a, b) for h in holes]
+        ps, pw, net = _edge_slice_profile(_to_edge_frame(verts, a, b), frame_holes)
+        isempty(holes) || (area = net * hypot(b[1] - a[1], b[2] - a[2]))
     end
     
     # Compute cell boundary depths (includes l2_stiff via cubic mean)
@@ -468,7 +741,35 @@ function _make_tributary_with_depths(edge_idx::Int, verts::Vector{NTuple{2,Float
     
     TributaryPolygon(edge_idx, s, d, area, frac,
                      cell.s_vals, cell.depths, cell.l2_stiff,
-                     cell.max, cell.s_max)
+                     cell.max, cell.s_max, ps, pw)
+end
+
+"""
+    assert_tributary_balance(tribs, pts, net_area; context="")
+
+Throw unless every edge's load profile carries its area and the areas sum to
+`net_area`. A shortfall is floor load that would reach no beam.
+"""
+function assert_tributary_balance(tribs::Vector{TributaryPolygon},
+                                  pts::Vector{NTuple{2,Float64}}, net_area::Float64;
+                                  context::AbstractString = "")
+    n = length(pts)
+    tol = 1e-6 * max(net_area, 1.0)
+    total = 0.0
+    for t in tribs
+        i = t.local_edge_idx
+        L = hypot(pts[mod1(i + 1, n)][1] - pts[i][1], pts[mod1(i + 1, n)][2] - pts[i][2])
+        carried = profile_area(t, L)
+        abs(carried - t.area) <= tol || error(
+            "Tributary of edge $i$(context) has area $(t.area) m² but its load profile " *
+            "carries $carried m². The rest of that floor would reach no beam.")
+        total += t.area
+    end
+    abs(total - net_area) <= tol || error(
+        "Tributaries$(context) sum to $total m² on a floor of $net_area m². " *
+        "The partition " * (total < net_area ? "misses" : "double counts") *
+        " $(abs(total - net_area)) m².")
+    return nothing
 end
 
 """Shoelace formula for signed polygon area."""

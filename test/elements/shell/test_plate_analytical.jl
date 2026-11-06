@@ -130,13 +130,22 @@ function apply_simply_supported_bc(nodes::Vector{Asap.Node}, L::Float64, n::Int;
         end
     end
     
-    # Pin corner to prevent in-plane rigid body motion
+    # Fix one corner in-plane to remove rigid translations.
     corner_idx = findfirst(nd -> begin
         x = ustrip(u"m", nd.position[1])
         y = ustrip(u"m", nd.position[2])
         abs(x + L/2) < tol && abs(y + L/2) < tol
     end, nodes)
     append!(fixed_dofs, nodes[corner_idx].globalID[[1, 2]])  # u, v
+
+    # One additional tangential restraint removes rigid rotation about the
+    # pinned corner without over-constraining in-plane plate deformation.
+    x_edge_idx = findfirst(nd -> begin
+        x = ustrip(u"m", nd.position[1])
+        y = ustrip(u"m", nd.position[2])
+        abs(x - L/2) < tol && abs(y + L/2) < tol
+    end, nodes)
+    push!(fixed_dofs, nodes[x_edge_idx].globalID[2])  # v
     
     return unique(fixed_dofs)
 end

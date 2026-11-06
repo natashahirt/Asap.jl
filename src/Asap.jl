@@ -10,6 +10,7 @@ using Unitful
 # Other packages (StructuralSizer, StructuralSynthesizer) import from here.
 include("Units/units.jl")
 Unitful.register(Asap)
+include("threading.jl")
 
 # Snapshot Unitful.basefactors after @unit / @refunit definitions so __init__
 # can restore them at runtime. Precompilation serialises the module but *not*
@@ -58,6 +59,7 @@ export to_kg_per_m3, to_m_per_s2
 
 # Float64 conversion factors (for catalog parsing without Rational overflow)
 export IN_TO_M, IN2_TO_M2, IN3_TO_M3, IN4_TO_M4, IN6_TO_M6
+export FT_TO_M, LBF_TO_N, KIP_TO_N, PSI_TO_PA, KSI_TO_PA, PSF_TO_PA
 
 # Catalog parsing utilities
 export asfloat, maybe_asfloat
@@ -194,6 +196,7 @@ export AreaLoad
 export SelfWeight
 export intensities
 export nodal_forces
+export fem_quadratic_segment
 
 # TRIBUTARY AREA COMPUTATION
 # Must be included before shell_loads.jl (which uses get_tributary_polygons)
@@ -343,6 +346,8 @@ export shell_tris_at_point
 export shell_tris_in_region
 
 function __init__()
+    # Per-thread scratch is sized here, not at precompile. See threading.jl.
+    _init_thread_pools!()
     merge!(Unitful.basefactors, _localunits)
     merge!(Unitful.promotion,   _localpromotion)
     Unitful.register(Asap)

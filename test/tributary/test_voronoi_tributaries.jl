@@ -155,6 +155,21 @@ using Test
         println("Inner corner area: $inner_corner_area")
         println("Outer corner areas: $outer_corner_areas")
     end
+
+    @testset "Clip and area: no overlap is zero, failures raise" begin
+        poly(pts) = Asap._create_meshes_polygon(pts)
+        sq_a = poly([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)])
+        sq_far = poly([(5.0, 5.0), (6.0, 5.0), (6.0, 6.0), (5.0, 6.0)])
+        @test isnothing(Asap._clip_to_boundary(sq_a, sq_far))
+        @test Asap._meshes_area(nothing) == 0.0
+
+        # Meshes cannot intersect two non-convex polygons; that must not
+        # read as "no overlap".
+        L1 = poly([(0.0, 0.0), (4.0, 0.0), (4.0, 1.0), (1.0, 1.0), (1.0, 4.0), (0.0, 4.0)])
+        L2 = poly([(0.5, 0.5), (4.5, 0.5), (4.5, 1.5), (1.5, 1.5), (1.5, 4.5), (0.5, 4.5)])
+        @test_throws ErrorException Asap._clip_to_boundary(L1, L2)
+        @test_throws MethodError Asap._meshes_area(:not_a_geometry)
+    end
 end
 
 println("\n✓ Voronoi tributary tests passed!")

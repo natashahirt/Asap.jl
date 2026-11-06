@@ -89,7 +89,7 @@ end
                           1e-4u"m^4", 1e-4u"m^4", 1e-4u"m^4", 7850u"kg/m^3")
         beam = Asap.Element(n1, n2, sec, :test)
         
-        edge_idx = Asap.match_beam_to_polygon_edge(beam, vertices)
+        edge_idx = Asap._match_beam_to_polygon_edge(beam, vertices)
         @test edge_idx == 1
     end
     
@@ -104,7 +104,7 @@ end
                           1e-4u"m^4", 1e-4u"m^4", 1e-4u"m^4", 7850u"kg/m^3")
         beam = Asap.Element(n1, n2, sec, :test)
         
-        edge_idx = Asap.match_beam_to_polygon_edge(beam, vertices)
+        edge_idx = Asap._match_beam_to_polygon_edge(beam, vertices)
         @test edge_idx == 1  # Should still match edge 1
     end
     
@@ -128,7 +128,7 @@ end
             n2 = Asap.Node([stop[1]*u"m", stop[2]*u"m", 0.0u"m"], :free)
             beam = Asap.Element(n1, n2, sec, :test)
             
-            edge_idx = Asap.match_beam_to_polygon_edge(beam, vertices)
+            edge_idx = Asap._match_beam_to_polygon_edge(beam, vertices)
             @test edge_idx == expected_edge
         end
     end
@@ -144,7 +144,7 @@ end
                           1e-4u"m^4", 1e-4u"m^4", 1e-4u"m^4", 7850u"kg/m^3")
         beam = Asap.Element(n1, n2, sec, :interior)
         
-        edge_idx = Asap.match_beam_to_polygon_edge(beam, vertices)
+        edge_idx = Asap._match_beam_to_polygon_edge(beam, vertices)
         @test isnothing(edge_idx)
     end
     
@@ -161,11 +161,11 @@ end
         beam = Asap.Element(n1, n2, sec, :test)
         
         # Should match with default tolerance
-        edge_idx = Asap.match_beam_to_polygon_edge(beam, vertices)
+        edge_idx = Asap._match_beam_to_polygon_edge(beam, vertices)
         @test edge_idx == 1
         
         # Should not match with very tight tolerance
-        edge_idx_strict = Asap.match_beam_to_polygon_edge(beam, vertices; tol=1e-12)
+        edge_idx_strict = Asap._match_beam_to_polygon_edge(beam, vertices; tol=1e-12)
         @test isnothing(edge_idx_strict)
     end
     
@@ -173,10 +173,10 @@ end
         vertices = [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)]
         
         # Test tuple-based edge matching
-        edge_idx = Asap.match_beam_to_polygon_edge((0.0, 0.0), (4.0, 0.0), vertices)
+        edge_idx = Asap._match_beam_to_polygon_edge((0.0, 0.0), (4.0, 0.0), vertices)
         @test edge_idx == 1
         
-        edge_idx = Asap.match_beam_to_polygon_edge((4.0, 0.0), (4.0, 3.0), vertices)
+        edge_idx = Asap._match_beam_to_polygon_edge((4.0, 0.0), (4.0, 3.0), vertices)
         @test edge_idx == 2
     end
     
@@ -191,7 +191,7 @@ end
     @testset "Four triangles meeting at center" begin
         shells, nodes = make_rect_shells(4.0, 3.0)
         
-        boundary = Asap.get_shell_panel_boundary(shells)
+        boundary = Asap._get_shell_panel_boundary(shells)
         
         @test length(boundary) == 4  # 4 vertices
         
@@ -210,7 +210,7 @@ end
         s1 = Asap.ShellTri3((n1, n2, n3), 0.15u"m", 30e9u"Pa", 0.2; id=:slab, ρ=2400.0)
         s2 = Asap.ShellTri3((n1, n3, n4), 0.15u"m", 30e9u"Pa", 0.2; id=:slab, ρ=2400.0)
         
-        boundary = Asap.get_shell_panel_boundary([s1, s2])
+        boundary = Asap._get_shell_panel_boundary([s1, s2])
         
         @test length(boundary) == 4
         area = Asap._polygon_area(boundary)
@@ -236,11 +236,11 @@ end
         all_shells = [sa1, sa2, sb1, sb2]
         
         # Filter by panel_A
-        boundary_A = Asap.get_shell_panel_boundary(all_shells; panel_id=:panel_A)
+        boundary_A = Asap._get_shell_panel_boundary(all_shells; panel_id=:panel_A)
         @test length(boundary_A) >= 3  # At least a triangle
         
         # Filter by panel_B
-        boundary_B = Asap.get_shell_panel_boundary(all_shells; panel_id=:panel_B)
+        boundary_B = Asap._get_shell_panel_boundary(all_shells; panel_id=:panel_B)
         @test length(boundary_B) >= 3
     end
     

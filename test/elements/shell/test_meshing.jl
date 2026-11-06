@@ -186,4 +186,28 @@ using LinearAlgebra
         
         @test length(shells) >= 2
     end
+
+    @testset "A hole is left out of the mesh" begin
+        n1 = Node([0.0u"m", 0.0u"m", 0.0u"m"], :free)
+        n2 = Node([10.0u"m", 0.0u"m", 0.0u"m"], :free)
+        n3 = Node([10.0u"m", 6.0u"m", 0.0u"m"], :free)
+        n4 = Node([0.0u"m", 6.0u"m", 0.0u"m"], :free)
+        sec = ShellSection(0.2u"m", 30u"GPa", 0.2)
+        hole = [(4.0, 2.0), (6.0, 2.0), (6.0, 4.0), (4.0, 4.0)]
+        shells = Shell((n1, n2, n3, n4), sec; target_edge_length = 1.0u"m",
+                       holes = [hole], edge_support_type = :free)
+        @test sum(s.area for s in shells) ≈ 10 * 6 - 4 atol = 0.5
+        for s in shells
+            xs = [ustrip(u"m", n.position[1]) for n in s.nodes]
+            ys = [ustrip(u"m", n.position[2]) for n in s.nodes]
+            cx, cy = sum(xs) / 3, sum(ys) / 3
+            @test !(4.0 < cx < 6.0 && 2.0 < cy < 4.0)
+        end
+
+        # A node already on the hole edge is the mesh node, not a second point.
+        edge = Node([5.0u"m", 2.0u"m", 0.0u"m"], :free)
+        shared = Shell((n1, n2, n3, n4), sec; target_edge_length = 1.0u"m",
+                       holes = [hole], interior_nodes = [edge], edge_support_type = :free)
+        @test any(s -> edge in s.nodes, shared)
+    end
 end

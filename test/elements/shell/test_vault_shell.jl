@@ -215,7 +215,8 @@ end
         n3 = Node([span_m*u"m", depth_m*u"m", 0.0u"m"], :pinned)
         n4 = Node([0.0u"m", depth_m*u"m", 0.0u"m"], :pinned)
         
-        section = ShellSection(t_m*u"m", 30u"GPa", 0.2; ρ=0.0)  # No self-weight
+        section = ShellSection(
+            t_m*u"m", 30u"GPa", 0.2; ρ=0.0u"kg/m^3")  # No self-weight
         shells = VaultShell((n1, n2, n3, n4), section, (1.0, 0.0), rise_m;
                             target_edge_length=0.3u"m", edge_support_type=:pinned)
         
@@ -250,13 +251,16 @@ end
         section = ShellSection(0.10u"m", 30u"GPa", 0.2)
         
         # Zero rise
-        @test_throws AssertionError VaultShell((n1, n2, n3, n4), section, (1.0, 0.0), 0.0)
+        @test_throws DomainError VaultShell(
+            (n1, n2, n3, n4), section, (1.0, 0.0), 0.0)
         
         # Negative rise
-        @test_throws AssertionError VaultShell((n1, n2, n3, n4), section, (1.0, 0.0), -0.5)
+        @test_throws DomainError VaultShell(
+            (n1, n2, n3, n4), section, (1.0, 0.0), -0.5)
         
         # Too few corners
-        @test_throws AssertionError VaultShell((n1, n2, n3), section, (1.0, 0.0), 0.5)
+        @test_throws ArgumentError VaultShell(
+            (n1, n2, n3), section, (1.0, 0.0), 0.5)
     end
     
     @testset "Rise with Unitful quantity" begin

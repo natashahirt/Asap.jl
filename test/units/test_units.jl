@@ -29,6 +29,14 @@
     # Physical constants
     @testset "Physical Constants" begin
         @test GRAVITY ≈ 9.80665u"m/s^2"
+        @test FT_TO_M == ustrip(u"m", 1.0u"ft")
+        @test LBF_TO_N == ustrip(u"N", 1.0u"lbf")
+        @test KIP_TO_N == ustrip(u"N", 1.0kip)
+        @test PSI_TO_PA == ustrip(u"Pa", 1.0u"psi")
+        @test KSI_TO_PA == ustrip(u"Pa", 1.0ksi)
+        @test PSF_TO_PA == ustrip(u"Pa", 1.0psf)
+        @test KIP_TO_N == 1000 * LBF_TO_N
+        @test KSI_TO_PA == 1000 * PSI_TO_PA
     end
 end
 

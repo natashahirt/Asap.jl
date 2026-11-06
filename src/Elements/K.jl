@@ -47,12 +47,10 @@ _KWorkspace() = _KWorkspace(
     zeros(6, 12), zeros(12, 12), zeros(12, 12)
 )
 
-const _K_WS_POOL = [_KWorkspace() for _ in 1:max(1, Threads.nthreads())]
+# Per-thread pool, filled in `Asap.__init__` (see threading.jl).
+const _K_WS_POOL = _KWorkspace[]
 
-@inline function _get_k_ws()
-    tid = Threads.threadid()
-    @inbounds return _K_WS_POOL[tid]
-end
+@inline _get_k_ws() = _thread_buffer(_K_WS_POOL)
 
 # =============================================================================
 # Natural Deformation Formulation
@@ -248,6 +246,186 @@ end
 
 
 # =============================================================================
+# Released-Element Local Stiffness (member end releases)
+# =============================================================================
+#
+# The released-element stiffness matrices below are obtained by *static
+# condensation* (member end-release modification) of the fully fixed-fixed
+# 12x12 local stiffness matrix. This is a standard, closed-form matrix-analysis
+# operation — NOT an approximation and NOT invented mechanics.
+#
+# Derivation (static condensation of released DOFs):
+#   Partition the fixed-fixed stiffness K and the local end forces/displacements
+#   into retained (r) and released (c) sets:
+#       [f_r]   [K_rr  K_rc] [u_r]
+#       [f_c] = [K_cr  K_cc] [u_c]
+#   A member end release (internal hinge / moment release) enforces zero force
+#   conjugate to each released DOF, i.e. f_c = 0. Solving the second row for u_c
+#   and back-substituting gives the reduced stiffness on the retained DOFs:
+#       u_c = -K_cc^{-1} K_cr u_r
+#       f_r = (K_rr - K_rc K_cc^{-1} K_cr) u_r
+#   The released DOFs then carry zero rows and zero columns.
+#
+# References (member end releases / static condensation):
+#   - W. McGuire, R.H. Gallagher, R.D. Ziemian, "Matrix Structural Analysis,"
+#     2nd ed., Sec. 7.4 (static condensation) and Sec. 13.x (member releases).
+#   - A. Kassimali, "Structural Analysis," 5th ed., Table 8.1 / Table 8.2
+#     (member stiffness coefficients with end moment releases).
+#   - Weaver & Gere, "Matrix Analysis of Framed Structures," 3rd ed., Sec. 6.5.
+#
+# Local DOF ordering (matches `local_cartesian_to_natural!` and the assembled
+# global DOFs, node i then node j):
+#   1: u_x,i  2: u_y,i  3: u_z,i  4: theta_x,i  5: theta_y,i  6: theta_z,i
+#   7: u_x,j  8: u_y,j  9: u_z,j 10: theta_x,j 11: theta_y,j 12: theta_z,j
+#
+# The four physical actions (axial, torsion, bending in the x-y plane, bending
+# in the x-z plane) are uncoupled in the local frame, so releasing a rotational
+# DOF only affects its own action. Per `natural_stiffness_bernoulli!` and
+# `global_K!(::Element{FixedFixed})` the plane assignment is I3 = Ix (bending
+# with transverse translation u_y / rotation theta_z) and I2 = Iy (bending with
+# transverse translation u_z / rotation theta_y).
+
+"""
+    _k_fixedfixed_full(E, A, L, G, Ix, Iy, J, Ay, Az)
+
+Assemble the full 12x12 fixed-fixed local stiffness matrix using the natural
+deformation formulation, matching the DOF ordering and I2=Iy / I3=Ix plane
+assignment used by `global_K!(::Element{FixedFixed})`.
+"""
+function _k_fixedfixed_full(E, A, L, G, Ix, Iy, J, Ay, Az)
+    K = zeros(12, 12)
+    aN = zeros(6, 12)
+    DN = zeros(6, 6)
+    # I2 = Iy (weak), I3 = Ix (strong) — identical argument order to the
+    # optimized global_K!(::Element{FixedFixed}) path above.
+    local_stiffness_natural!(K, E, G, A, Iy, Ix, J, Ay, Az, L, aN, DN)
+    # Symmetrize to remove any round-off asymmetry from the triple product.
+    return 0.5 .* (K .+ transpose(K))
+end
+
+"""
+    _condense_released_dofs(K, released)
+
+Static condensation of the `released` local DOFs from a 12x12 stiffness matrix
+`K`, returning a 12x12 matrix whose released rows/columns are zero and whose
+retained block is `K_rr - K_rc K_cc^{-1} K_cr` (see derivation above). `K_cc`
+must be non-singular (true for every release handled here).
+"""
+function _condense_released_dofs(K::Matrix{Float64}, released::Vector{Int})
+    n = size(K, 1)
+    retained = setdiff(1:n, released)
+    Krr = K[retained, retained]
+    Krc = K[retained, released]
+    Kcc = K[released, released]
+    # K_rc K_cc^{-1} K_cr, with K_cr = K_rc' by symmetry of K.
+    Kred = Krr .- Krc * (Kcc \ transpose(Krc))
+    out = zeros(n, n)
+    out[retained, retained] .= 0.5 .* (Kred .+ transpose(Kred))
+    # Snap catastrophic-cancellation round-off to exactly zero. When an entire
+    # plane's rotations are released (pin-pin), the retained transverse-
+    # translation stiffness is analytically zero (McGuire §7.4 Schur complement),
+    # but the difference of two large near-equal terms leaves ~1e-18-relative
+    # dust. The threshold is scaled to the matrix and sits many orders below any
+    # physical stiffness coefficient, so no retained term is altered.
+    tol = 1e-9 * maximum(abs, K)
+    @inbounds for j in 1:n, i in 1:n
+        if abs(out[i, j]) < tol
+            out[i, j] = 0.0
+        end
+    end
+    return out
+end
+
+"""
+    k_fixedfixed(E, A, L, G, Ix, Iy, J; Ay = Inf, Az = Inf)
+
+Full fixed-fixed 12x12 local stiffness matrix (no releases). Retains all six
+end actions at both nodes. `Ay`/`Az` default to `Inf`, selecting the
+Bernoulli-Euler formulation; finite values select Timoshenko shear flexibility.
+"""
+function k_fixedfixed(E, A, L, G, Ix, Iy, J; Ay = Inf, Az = Inf)
+    return _k_fixedfixed_full(E, A, L, G, Ix, Iy, J, Ay, Az)
+end
+
+"""
+    k_fixedfree(E, A, L, Ix, Iy)
+
+Local stiffness for a member fixed at the start node i and fully rotationally
+released at the end node j (release `:fixedfree`). Both bending planes become
+fixed-pinned ("propped cantilever") members; releasing torsion at end j removes
+torsional stiffness member-wide, so `G`/`J` are not required.
+
+Built by condensing the released bending rotations theta_y,j (DOF 11) and
+theta_z,j (DOF 12) from a fixed-fixed matrix assembled with G = J = 0 (torsion
+DOFs 4 and 10 therefore carry zero rows/columns, matching the released torsion).
+Kassimali "Structural Analysis" 5e, Table 8.2 (member with a hinge at one end):
+transverse stiffness 3EI/L^3 and rotational stiffness 3EI/L at the fixed end.
+"""
+function k_fixedfree(E, A, L, Ix, Iy)
+    Kff = _k_fixedfixed_full(E, A, L, 0.0, Ix, Iy, 0.0, Inf, Inf)
+    return _condense_released_dofs(Kff, [11, 12])
+end
+
+"""
+    k_freefixed(E, A, L, Ix, Iy)
+
+Local stiffness for a member fully rotationally released at the start node i and
+fixed at the end node j (release `:freefixed`) — the mirror image of
+`k_fixedfree`. Bending planes become pinned-fixed members; torsion released at
+start i removes torsional stiffness member-wide.
+
+Built by condensing the released bending rotations theta_y,i (DOF 5) and
+theta_z,i (DOF 6) from a fixed-fixed matrix assembled with G = J = 0.
+Kassimali "Structural Analysis" 5e, Table 8.2 (member with a hinge at one end).
+"""
+function k_freefixed(E, A, L, Ix, Iy)
+    Kff = _k_fixedfixed_full(E, A, L, 0.0, Ix, Iy, 0.0, Inf, Inf)
+    return _condense_released_dofs(Kff, [5, 6])
+end
+
+"""
+    k_freefree(E, A, L, Ix, Iy)
+
+Local stiffness for a member with all rotational DOFs (both bending planes and
+torsion) released at both ends (release `:freefree`). This is the classical
+two-force / truss member: only axial stiffness EA/L survives on the axial DOFs
+(1 and 7); every other row/column is zero.
+
+Built by condensing both bending rotations of both planes — theta_y,i (DOF 5),
+theta_z,i (DOF 6), theta_y,j (DOF 11), theta_z,j (DOF 12) — from a fixed-fixed
+matrix assembled with G = J = 0 (so torsion DOFs 4 and 10 already carry zero
+rows/columns, matching the released torsion at both ends). Condensing both
+bending rotations of a plane drives that plane's transverse stiffness to exactly
+zero (Kassimali "Structural Analysis" 5e — pin-pin member), leaving only the
+axial two-force member.
+"""
+function k_freefree(E, A, L, Ix, Iy)
+    Kff = _k_fixedfixed_full(E, A, L, 0.0, Ix, Iy, 0.0, Inf, Inf)
+    return _condense_released_dofs(Kff, [5, 6, 11, 12])
+end
+
+"""
+    k_joist(E, A, L, G, J, Ix, Iy)
+
+Local stiffness for a joist / open-web-steel-joist idealization (release
+`:joist`): bending is released at both ends in both planes, but axial (EA) and
+torsion (GJ) are retained. This is the open-web-steel-joist idealization used
+for OWSJ members.
+
+Built by condensing the four released bending rotations — theta_y,i (DOF 5),
+theta_z,i (DOF 6), theta_y,j (DOF 11), theta_z,j (DOF 12) — from a fixed-fixed
+matrix assembled with the real G and J (torsion DOFs 4 and 10 stay in the
+retained set). Static condensation drives both transverse (bending) planes to
+exactly zero stiffness (Kassimali "Structural Analysis" 5e — pin-pin member), so
+the result is the rank-2 matrix with axial EA/L on DOFs (1, 7) and St. Venant
+torsion GJ/L on DOFs (4, 10); every other row/column is zero.
+"""
+function k_joist(E, A, L, G, J, Ix, Iy)
+    Kff = _k_fixedfixed_full(E, A, L, G, Ix, Iy, J, Inf, Inf)
+    return _condense_released_dofs(Kff, [5, 6, 11, 12])
+end
+
+# =============================================================================
 # Element Local Stiffness Functions
 # =============================================================================
 
@@ -287,7 +465,9 @@ local_K(element::Element{FreeFixed}) = k_freefixed(
 local_K(element::Element{FreeFree}) = k_freefree(
     to_pascals(element.section.E),
     to_meters_squared(element.section.A),
-    to_meters(element.length)
+    to_meters(element.length),
+    to_meters_fourth(element.section.Ix),
+    to_meters_fourth(element.section.Iy)
 )
 
 local_K(element::Element{Joist}) = k_joist(
@@ -295,7 +475,9 @@ local_K(element::Element{Joist}) = k_joist(
     to_meters_squared(element.section.A),
     to_meters(element.length),
     to_pascals(element.section.G),
-    to_meters_fourth(element.section.J)
+    to_meters_fourth(element.section.J),
+    to_meters_fourth(element.section.Ix),
+    to_meters_fourth(element.section.Iy)
 )
 
 local_K(element::TrussElement) = to_pascals(element.section.E) * to_meters_squared(element.section.A) / to_meters(element.length) .* [1 -1; -1 1]

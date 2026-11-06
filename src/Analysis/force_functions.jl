@@ -278,6 +278,7 @@ function MPoint_freefree(P, L, x, frac)
 end
 
 MPoint(::Element{FreeFree}, P, L, x, frac) = MPoint_freefree(P, L, x, frac)
+MPoint(::Element{Joist}, P, L, x, frac) = MPoint_freefree(P, L, x, frac)
 
 """
     VPoint_freefree(P, L, x, frac)
@@ -295,6 +296,7 @@ function VPoint_freefree(P, L, x, frac)
 end
 
 VPoint(::Element{FreeFree}, P, L, x, frac) = VPoint_freefree(P, L, x, frac)
+VPoint(::Element{Joist}, P, L, x, frac) = VPoint_freefree(P, L, x, frac)
 
 """
     DPoint_freefree(P, L, x, frac, E, I)
@@ -320,6 +322,7 @@ function DPoint_freefree(P, L, x, frac, E, I)
 end
 
 DPoint(::Element{FreeFree}, P, L, x, frac, E, I) = DPoint_freefree(P, L, x, frac, E, I)
+DPoint(::Element{Joist}, P, L, x, frac, E, I) = DPoint_freefree(P, L, x, frac, E, I)
 
 """
     ThetaPoint_freefree(P, L, x, frac, E, I)
@@ -345,6 +348,7 @@ function ThetaPoint_freefree(P, L, x, frac, E, I)
 end
 
 ThetaPoint(::Element{FreeFree}, P, L, x, frac, E, I) = ThetaPoint_freefree(P, L, x, frac, E, I)
+ThetaPoint(::Element{Joist}, P, L, x, frac, E, I) = ThetaPoint_freefree(P, L, x, frac, E, I)
 
 """
     MPoint_fixedfixed(P, L, x, frac)

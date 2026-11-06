@@ -134,8 +134,11 @@ function solve_nonlinear!(model::FrameModel;
             Kg = assemble_geometric_stiffness(model)
             Kt = model.S + Kg
             
-            # Compute internal force vector
-            F_int = compute_internal_forces(model, idx)
+            # Fixed-end actions are already carried by the effective external
+            # load `P - Pf`. The restoring force must therefore contain only
+            # the displacement-dependent contribution; assembling element
+            # postprocessing forces here would add `Pf` a second time.
+            F_int = (model.S * model.u)[idx]
             
             # Residual (out-of-balance force)
             R = F_ext - F_int
@@ -246,7 +249,9 @@ function solve_nonlinear!(model::Model;
             Kg = assemble_geometric_stiffness(model)
             Kt = model.S + Kg
             
-            F_int = compute_internal_forces(model, idx)
+            # `P - Pf` owns fixed-end actions; use only the
+            # displacement-dependent restoring force on the internal side.
+            F_int = (model.S * model.u)[idx]
             
             R = F_ext - F_int
             residual_norm = norm(R)
@@ -292,71 +297,6 @@ function solve_nonlinear!(model::Model;
     
     return NonlinearResult(overall_converged, load_factors, displacements, 
                            iterations_per_step, equilibrium_errors)
-end
-
-# =============================================================================
-# Internal Force Computation
-# =============================================================================
-
-"""
-Compute the internal force vector from current element forces.
-"""
-function compute_internal_forces(model::FrameModel, free_dofs::Vector{Int})
-    F_int = zeros(model.nDOFs)
-    
-    for element in model.elements
-        if !(element isa FrameElement)
-            continue
-        end
-        
-        # Element forces in global coordinates
-        # F_global = R' * F_local
-        R = element.R
-        f_local = element.forces
-        f_global = R' * f_local
-        
-        # Assemble into global vector
-        gid = element.globalID
-        for i in 1:12
-            F_int[gid[i]] += f_global[i]
-        end
-    end
-    
-    return F_int[free_dofs]
-end
-
-function compute_internal_forces(model::Model, free_dofs::Vector{Int})
-    F_int = zeros(model.nDOFs)
-    
-    # Frame elements
-    for element in model.frame_elements
-        if !(element isa FrameElement)
-            continue
-        end
-        
-        R = element.R
-        f_local = element.forces
-        f_global = R' * f_local
-        
-        gid = element.globalID
-        for i in 1:12
-            F_int[gid[i]] += f_global[i]
-        end
-    end
-    
-    # Shell elements - for now, use K*u approximation
-    # (Full shell internal force requires stress integration)
-    for shell in model.shell_elements
-        # Shell contribution: F_int = K_shell * u_shell
-        gid = shell.globalID
-        u_elem = model.u[gid]
-        f_elem = shell.K * u_elem
-        for i in eachindex(gid)
-            F_int[gid[i]] += f_elem[i]
-        end
-    end
-    
-    return F_int[free_dofs]
 end
 
 # =============================================================================

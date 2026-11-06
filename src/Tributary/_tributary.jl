@@ -55,12 +55,12 @@ function get_tributary_polygons(
     vertices::Vector{<:Point};
     weights::Union{Nothing, AbstractVector{<:Real}} = nothing,
     axis::Union{Nothing, AbstractVector{<:Real}} = nothing,
-    buffers::Union{Nothing, TributaryBuffers} = nothing
+    buffers::Union{Nothing, TributaryBuffers} = nothing,
+    holes = nothing
 )
     if isnothing(axis) || hypot(axis[1], axis[2]) < 1e-12
-        # Isotropic uses DCEL which doesn't yet support buffer reuse
-        return get_tributary_polygons_isotropic(vertices; weights=weights)
+        return get_tributary_polygons_isotropic(vertices; weights=weights, holes=holes)
     else
-        return get_tributary_polygons_one_way(vertices; weights=weights, axis=axis, buffers=buffers)
+        return get_tributary_polygons_one_way(vertices; weights=weights, axis=axis, holes=holes)
     end
 end

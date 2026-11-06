@@ -417,7 +417,7 @@ end
 # =============================================================================
 
 """
-    SelfWeight(shells; g=9.81u"m/s^2")
+    SelfWeight(shells; g=GRAVITY)
     SelfWeight(shells, g)
 
 Create an AreaLoad representing the self-weight of shell elements.
@@ -426,7 +426,7 @@ Computes pressure from shell properties: `p = ρ × t × g`
 
 # Arguments
 - `shells`: Shell elements (must have ρ defined)
-- `g`: Gravitational acceleration (default: 9.81 m/s²)
+- `g`: Gravitational acceleration (default: [`GRAVITY`](@ref))
 
 # Example
 ```julia
@@ -442,7 +442,7 @@ sw = SelfWeight(shells; g=10u"m/s^2")
 """
 function SelfWeight(
     shells::Vector{<:ShellElement};
-    g::Quantity = 9.81u"m/s^2",
+    g::Quantity = GRAVITY,
     id::Symbol = :selfweight
 )
     isempty(shells) && error("SelfWeight requires at least one shell element")

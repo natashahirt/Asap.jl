@@ -2,7 +2,7 @@
 Element Definitions for Asap.jl
 ===============================
 
-Core structural element types: frame beams, bridge elements, and truss elements.
+Core structural element types: frame beams and truss elements.
 
 Eccentric connection support based on formulations from:
 - FinEtoolsFlexStructures.jl by Petr Krysl - MIT License
@@ -121,56 +121,6 @@ Check if element has eccentric connections.
 has_eccentricity(elem::Element) = any(e != 0.0 for e in elem.eccentricity)
 
 """
-    BridgeElement(elementStart, posStart, elementEnd, posEnd, section, id=:element; release=:fixedfixed)
-
-Create a bridge element between two frame elements. 
-
-Connects from `elementStart` at position `elementStart.length * posStart` away from 
-`elementStart.nodeStart.position` to `elementEnd` at `elementEnd.length * posEnd` away 
-from `elementEnd.nodeStart.position`. 
-
-Note: `posStart, posEnd ∈ ]0, 1[`
-"""
-mutable struct BridgeElement{R<:Release} <: FrameElement{R}
-    elementStart::Element
-    posStart::Float64
-    elementEnd::Element
-    posEnd::Float64
-    section::Section
-    release::Symbol
-    Ψ::Float64
-    elementID::Int64
-    id::Union{Symbol, Nothing}
-
-    function BridgeElement(elementStart::Element, 
-            posStart::Float64, 
-            elementEnd::Element, 
-            posEnd::Float64, 
-            section::Section,
-            id = :element;
-            release = :fixedfixed)
-
-        @assert 0 < posStart < 1 && 0 < posEnd < 1 "posStart/End must be ∈ ]0,1["
-        @assert in(release, keys(_ReleaseDict))
-
-        be = new{_ReleaseDict[release]}(
-            elementStart, 
-            posStart, 
-            elementEnd, 
-            posEnd, 
-            section, 
-            release, 
-            pi/2, 
-            0, 
-            id
-        )
-
-        return be
-    end
-end
-
-
-"""
     TrussElement(nodeStart, nodeEnd, section, id=:element)
 
 Create a truss element (axial force only, no bending).
@@ -205,7 +155,7 @@ mutable struct TrussElement <: AbstractElement
             0.0u"m",  # Initialize length as Quantity
             zeros(2, 2),
             zeros(2, 6),
-            zeros(6),
+            zeros(2),  # local axial end forces; R maps 6 global DOFs to 2
             pi/2,
             [zeros(3), zeros(3), zeros(3)],
             id

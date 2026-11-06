@@ -56,6 +56,27 @@ using LinearAlgebra
         @test translational_stiffness(s) ≈ [100.0, 200.0, 300.0]
         @test rotational_stiffness(s) ≈ [10.0, 20.0, 30.0]
     end
+
+    @testset "Adding a spring invalidates the cached factorization" begin
+        n1 = Node([0.0u"m", 0.0u"m", 0.0u"m"], :fixed)
+        n2 = Node([1.0u"m", 0.0u"m", 0.0u"m"], :xfree)
+        section = Section(
+            1.0e-2u"m^2", 100.0u"GPa", 40.0u"GPa",
+            1.0e-4u"m^4", 1.0e-4u"m^4", 1.0e-5u"m^4",
+        )
+        model = FrameModel(
+            [n1, n2],
+            [Element(n1, n2, section)],
+            [NodeForce(n2, [1000.0u"N", 0.0u"N", 0.0u"N"])],
+        )
+
+        solve!(model)
+        @test model.u[n2.globalID[1]] ≈ 1.0e-6
+
+        add_springs!(model, Spring(n2; kx=1.0e9u"N/m"))
+        solve!(model)
+        @test model.u[n2.globalID[1]] ≈ 5.0e-7
+    end
     
     @testset "Cantilever on Spring Support - Analytical" begin
         #=

@@ -3,6 +3,7 @@ using Asap
 using LinearAlgebra
 using SparseArrays
 using Unitful
+using Random
 
 @testset "ShellTri3 Full Shell Element" begin
 
@@ -46,8 +47,9 @@ using Unitful
         eigvals_K = eigvals(Symmetric(elem.K))
         @test all(eigvals_K .>= -1e-6 * maximum(eigvals_K))
         
-        # For a single unconstrained shell element, there are ≥6 near-zero eigenvalues
-        # (6 rigid body modes + additional near-zeros from drilling DOF stabilization)
+        # For a single unconstrained shell element there are at least 6 near-zero
+        # eigenvalues: the six rigid-body modes. The in-plane rotation is one of
+        # them, because the drilling penalty vanishes when θz equals that rotation.
         rbm_count = count(x -> abs(x) < 1e-3 * maximum(abs, eigvals_K), eigvals_K)
         @test rbm_count >= 6  # At least 6 rigid body modes
         
@@ -237,6 +239,125 @@ using Unitful
         end
         
         @info "Surface load test passed" area=elem.area total_force=total_force
+    end
+
+    @testset "Drilling penalty is self-equilibrated" begin
+        # A triangle that is not in a coordinate plane, so the local frame is
+        # not the global one. Equilibrium is checked in that local frame.
+        n1 = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], :free)
+        n2 = Asap.Node([2.0u"m", 0.1u"m", 0.0u"m"], :free)
+        n3 = Asap.Node([0.3u"m", 1.4u"m", 0.2u"m"], :free)
+        elem = Asap.ShellTri3((n1, n2, n3), 0.3u"m", 30e9u"Pa", 0.2)
+        Asap.process!(elem)
+        K = Asap.local_K(elem)
+
+        # Resultant of the forces the element applies to its nodes, about
+        # node 1. The element frame puts that node at the origin.
+        function resultant(f)
+            Fx = Fy = Fz = Mx = My = Mz = 0.0
+            for i in 1:3
+                base = (i - 1) * 6
+                x = elem.ecoords_e[i, 1]
+                y = elem.ecoords_e[i, 2]
+                fx, fy, fz = f[base + 1], f[base + 2], f[base + 3]
+                Fx += fx
+                Fy += fy
+                Fz += fz
+                Mx += y * fz + f[base + 4]
+                My += -x * fz + f[base + 5]
+                Mz += x * fy - y * fx + f[base + 6]
+            end
+            return (Fx, Fy, Fz, Mx, My, Mz)
+        end
+
+        # Rigid rotation about the normal: u = −θ y, v = θ x, and θz = θ,
+        # which is the rotation the penalty is measured against.
+        θ = 1.0e-3
+        d = zeros(18)
+        for i in 1:3
+            x = elem.ecoords_e[i, 1]
+            y = elem.ecoords_e[i, 2]
+            base = (i - 1) * 6
+            d[base + 1] = -θ * y
+            d[base + 2] = θ * x
+            d[base + 6] = θ
+        end
+        f_rigid = K * d
+        @test norm(f_rigid) <= 1e-8 * opnorm(K, 1) * norm(d)
+
+        # Any displacement: no net force and no net moment.
+        f = K * rand(Random.Xoshiro(1), 18)
+        scale = max(norm(f), 1.0)
+        @test all(abs.(resultant(f)) .<= 1e-8 * scale)
+    end
+
+    @testset "Membrane-only element keeps exactly the in-plane stiffness" begin
+        n1 = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], :free)
+        n2 = Asap.Node([1.3u"m", 0.2u"m", 0.0u"m"], :free)
+        n3 = Asap.Node([0.4u"m", 0.9u"m", 0.0u"m"], :free)
+        full = Asap.ShellTri3((n1, n2, n3), 0.2u"m", 30e9u"Pa", 0.2)
+        mem = Asap.ShellTri3((n1, n2, n3), 0.2u"m", 30e9u"Pa", 0.2; membrane_only=true)
+        @test !full.membrane_only && mem.membrane_only
+        Asap.process!(full)
+        Asap.process!(mem)
+        Kf = Asap.local_K(full)
+        Km = Asap.local_K(mem)
+        inplane = [b + i for b in (0, 6, 12) for i in 1:2]
+        other = setdiff(1:18, inplane)
+        # The drilling penalty in the full element also touches u and v, so
+        # compare against a full element with the drilling penalty off.
+        nodrill = Asap.ShellTri3((n1, n2, n3), 0.2u"m", 30e9u"Pa", 0.2; drilling_scale=0.0)
+        Asap.process!(nodrill)
+        @test Km[inplane, inplane] ≈ Asap.local_K(nodrill)[inplane, inplane] rtol=1e-12
+        @test all(iszero, Km[other, :])
+        @test all(iszero, Km[:, other])
+        @test mem.K ≈ mem.K' rtol=1e-12
+        # Three in-plane rigid modes; the 6 in-plane DOFs have rank 3.
+        @test rank(Km[inplane, inplane]; rtol=1e-10) == 3
+    end
+
+    @testset "HAND CHECK membrane cantilever in its plane" begin
+        # Deep cantilever, L = 4 m, depth h = 2 m, t = 0.2 m, E = 30 GPa,
+        # ν = 0. Tip load P = 1000 kN spread over the free end.
+        # Timoshenko beam: δ = P L³/(3 E I) + P L/(κ G A), κ = 5/6, G = E/2.
+        L, h, t, E = 4.0, 2.0, 0.2, 30e9
+        P = 1.0e6
+        I = t * h^3 / 12
+        A = t * h
+        G = E / 2
+        δ_beam = P * L^3 / (3 * E * I) + P * L / ((5 / 6) * G * A)
+        function tip(nx, ny)
+            xs = range(0.0, L; length=nx + 1)
+            ys = range(0.0, h; length=ny + 1)
+            grid = Matrix{Asap.Node}(undef, nx + 1, ny + 1)
+            for i in 1:(nx + 1), j in 1:(ny + 1)
+                dof = i == 1 ? [false, false, false, false, false, false] :
+                               [true, true, false, false, false, false]
+                grid[i, j] = Asap.Node([xs[i] * u"m", ys[j] * u"m", 0.0u"m"], dof)
+            end
+            shells = Asap.ShellTri3[]
+            for i in 1:nx, j in 1:ny
+                a, b, c, d = grid[i, j], grid[i + 1, j], grid[i + 1, j + 1], grid[i, j + 1]
+                push!(shells, Asap.ShellTri3((a, b, c), t * u"m", E * u"Pa", 0.0; membrane_only=true))
+                push!(shells, Asap.ShellTri3((a, c, d), t * u"m", E * u"Pa", 0.0; membrane_only=true))
+            end
+            loads = Asap.AbstractLoad[]
+            # Consistent parabolic shear would be closer to beam theory; equal
+            # shares on a fine edge are enough for the end-load resultant.
+            for j in 1:(ny + 1)
+                w = (j == 1 || j == ny + 1) ? 0.5 / ny : 1.0 / ny
+                push!(loads, Asap.NodeForce(grid[end, j], [0.0u"N", -P * w * u"N", 0.0u"N"]))
+            end
+            model = Asap.ShellModel(vec(grid), shells, loads)
+            Asap.solve!(model)
+            return -sum(ustrip(u"m", grid[end, j].displacement[2]) for j in 1:(ny + 1)) / (ny + 1)
+        end
+        coarse = tip(4, 2)
+        fine = tip(32, 16)
+        # Linear triangles are stiff in bending: the coarse mesh under-reads.
+        @test coarse < fine
+        @test fine ≈ δ_beam rtol=0.05
+        @info "Membrane cantilever tip" δ_beam coarse fine
     end
 
 end

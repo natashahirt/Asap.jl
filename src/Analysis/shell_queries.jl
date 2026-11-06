@@ -230,7 +230,7 @@ end
 Zero-allocation convenience: compute bending moments into pre-allocated `M`.
 """
 function bending_moments!(M::AbstractVector{Float64}, elem::ShellTri3, model::AbstractModel,
-                          ws::ShellMomentWorkspace = _MOMENT_WS[Threads.threadid()])
+                          ws::ShellMomentWorkspace = _thread_buffer(_MOMENT_WS))
     @assert model.processed "Model must be solved first (call solve!)"
     return bending_moments!(M, elem, model.u, ws)
 end

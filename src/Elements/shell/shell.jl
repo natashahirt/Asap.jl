@@ -56,6 +56,9 @@ Suitable for flat or nearly-flat shell structures, plates, and slabs.
 - `κ::Real`: Shear correction factor (default: 5/6 ≈ 0.833 for rectangular sections)
 - `drilling_scale::Real`: Drilling DOF stabilization scale (default: 1.0)
 - `shear_stab::Real`: Lyly-Stenberg-Vihinen shear stabilization factor (default: 5/18 ≈ 0.278)
+- `membrane_only::Bool`: Keep only the membrane stiffness Kₘ (default: `false`). The element
+  then resists in-plane stretch and shear and nothing else: `w`, `θx`, `θy`, and `θz` get no
+  stiffness from it, so a node that only membrane elements touch must have those DOFs fixed.
 
 # Formulation Parameters
 
@@ -65,8 +68,10 @@ thickness. Standard value 5/6 is for rectangular cross-sections. Use:
 - κ = 0.9: Parabolic shear distribution approximation
 - κ = 1.0: No correction (conservative for thin shells)
 
-**Drilling scale**: Scales the artificial drilling DOF (θz) stiffness relative to average
-bending stiffness. Values 0.1–1.0 are typical. Set to 0.0 to disable (not recommended).
+**Drilling scale**: Scales the penalty that ties each node's drilling rotation θz to the
+triangle's own in-plane rotation, relative to the average bending-rotation stiffness.
+The penalty is self-equilibrated (no net force, no net moment). Values 0.1–1.0 are
+typical. Set to 0.0 to disable (not recommended: the drilling rotation is then unrestrained).
 
 **Shear stabilization (shear_stab)**: Controls the Lyly-Stenberg-Vihinen transverse shear 
 stabilization. Factor appears as: t³/(t² + shear_stab·h²) where h² ≈ 2·Area.
@@ -90,7 +95,7 @@ The element stiffness is K = Kₘ + Kᵦ + Kₛ + Kᵈ where:
 - Kₘ: Membrane stiffness (in-plane)
 - Kᵦ: Bending stiffness (curvature)
 - Kₛ: Transverse shear stiffness (DSG formulation)
-- Kᵈ: Drilling DOF stabilization
+- Kᵈ: Equilibrated drilling penalty (θz tied to the element's in-plane rotation)
 
 The shear stabilization factor follows Lyly-Stenberg-Vihinen (1993).
 """
@@ -112,6 +117,7 @@ mutable struct ShellTri3 <: ShellElement
     LCS::Vector{Vector{Float64}}  # Local axes [x̂, ŷ, ẑ] in GCS
     ecoords_e::Matrix{Float64}  # Node coords in element frame (3×2)
     id::Symbol
+    membrane_only::Bool         # In-plane stiffness only (no bending, shear, or drilling)
     
     function ShellTri3(
         nodes::NTuple{3, Node},
@@ -122,7 +128,8 @@ mutable struct ShellTri3 <: ShellElement
         ρ::Real = 0.0,
         κ::Real = 5.0/6.0,
         drilling_scale::Real = 1.0,
-        shear_stab::Real = 5.0/18.0
+        shear_stab::Real = 5.0/18.0,
+        membrane_only::Bool = false
     )
         @assert 0.0 <= ν < 0.5 "Poisson's ratio must be in [0, 0.5)"
         @assert 0.0 < κ <= 1.0 "Shear correction factor must be in (0, 1]"
@@ -150,7 +157,8 @@ mutable struct ShellTri3 <: ShellElement
             zeros(18, 18),
             [zeros(3), zeros(3), zeros(3)],
             zeros(3, 2),
-            id
+            id,
+            membrane_only
         )
     end
     
@@ -188,7 +196,8 @@ mutable struct ShellTri3 <: ShellElement
             zeros(18, 18),
             [zeros(3), zeros(3), zeros(3)],
             zeros(3, 2),
-            id
+            id,
+            false
         )
     end
     
@@ -210,6 +219,9 @@ mutable struct ShellTri3 <: ShellElement
             E_val,
             material.ν,
             ρ_val,
+            5.0/6.0,
+            1.0,
+            5.0/18.0,
             0,
             Vector{Int64}(undef, 18),
             area,
@@ -218,7 +230,8 @@ mutable struct ShellTri3 <: ShellElement
             zeros(18, 18),
             [zeros(3), zeros(3), zeros(3)],
             zeros(3, 2),
-            id
+            id,
+            false
         )
     end
 end
@@ -481,6 +494,59 @@ function _add_btdb!(K::Matrix{Float64}, B::Matrix{Float64},
     return K
 end
 
+"""
+    _add_equilibrated_drilling!(K, gradN, scale) -> K
+
+Penalize, at each node, the gap between the drilling rotation θz and the
+triangle's constant in-plane rotation
+
+    ω = ½ (∂v/∂x − ∂u/∂y).
+
+A rigid rotation about the shell normal has θz = ω at every node, so the
+penalty stores no energy on any of the six rigid modes. It is the Hessian of
+a potential of that relative rotation, and the nodal forces it produces sum to
+zero force and zero moment. A diagonal spring on θz alone is anchored to the
+ground and leaks moment out of the element.
+
+`scale` multiplies the mean of the bending-rotation diagonals already in `K`.
+That product is the stiffness of a pure drilling mode (ω = 0). `scale ≤ 0`
+adds nothing.
+
+This is the penalty form of tying the drilling rotation to the continuum spin
+(Hughes & Brezzi, "On drilling degrees of freedom", CMAME 72 (1989) 105–121).
+"""
+function _add_equilibrated_drilling!(K::Matrix{Float64}, gradN::Matrix{Float64}, scale::Real)
+    scale > 0.0 || return K
+    kavg = _mean((K[4, 4], K[5, 5], K[10, 10], K[11, 11], K[16, 16], K[17, 17]))
+    kpen = kavg * Float64(scale)
+    kpen > 0.0 || return K
+
+    # ω = Bω · d. Only the in-plane translations take part.
+    Bω = zeros(18)
+    @inbounds for i in 1:3
+        base = (i - 1) * 6
+        Bω[base + 1] = -0.5 * gradN[i, 2]   # u
+        Bω[base + 2] =  0.5 * gradN[i, 1]   # v
+    end
+
+    # K += kpen · Σᵢ Gᵢᵀ Gᵢ with Gᵢ = e_{θzᵢ} − Bω, so Gᵢ · d = θzᵢ − ω.
+    G = zeros(18)
+    @inbounds for i in 1:3
+        for j in 1:18
+            G[j] = -Bω[j]
+        end
+        G[(i - 1) * 6 + 6] += 1.0
+        for a in 1:18
+            ga = kpen * G[a]
+            ga == 0.0 && continue
+            for b in 1:18
+                K[a, b] += ga * G[b]
+            end
+        end
+    end
+    return K
+end
+
 """Complete lower triangle from upper triangle (symmetric matrix)."""
 function _complete_lt!(K::Matrix{Float64})
     n = size(K, 1)
@@ -501,7 +567,7 @@ The stiffness combines:
 - Membrane (in-plane stretch/shear)
 - Bending (plate curvature)
 - Transverse shear (DSG formulation with Lyly-Stenberg-Vihinen stabilization)
-- Drilling DOF stabilization
+- Equilibrated drilling penalty (θz tied to the in-plane rotation)
 
 Uses element's configurable parameters: κ (shear correction), drilling_scale, shear_stab.
 """
@@ -533,6 +599,12 @@ function local_K(elem::ShellTri3)
     # Membrane stiffness: K_m = t * Ae * Bm' * Dps * Bm
     _Bmmat!(Bm, gradN_e)
     _add_btdb!(K, Bm, t * Ae, Dps, DBm)
+
+    if elem.membrane_only
+        # In-plane element: w, θx, θy, and θz carry no stiffness from it.
+        _complete_lt!(K)
+        return K
+    end
     
     # Bending stiffness: K_b = (t³/12) * Ae * Bb' * Dps * Bb
     _Bbmat!(Bb, gradN_e)
@@ -548,14 +620,9 @@ function local_K(elem::ShellTri3)
     # Complete symmetric matrix
     _complete_lt!(K)
     
-    # Drilling DOF stabilization (θz)
-    # Add stiffness to drilling DOFs based on average bending stiffness
-    if elem.drilling_scale > 0.0
-        kavg = _mean([K[4,4], K[5,5], K[10,10], K[11,11], K[16,16], K[17,17]])
-        K[6, 6] += kavg * elem.drilling_scale
-        K[12, 12] += kavg * elem.drilling_scale
-        K[18, 18] += kavg * elem.drilling_scale
-    end
+    # Drilling penalty. Ties θz to the element's own in-plane rotation, so a
+    # rigid rotation stores no energy and the element leaks no moment.
+    _add_equilibrated_drilling!(K, gradN_e, elem.drilling_scale)
     
     return K
 end
@@ -799,7 +866,8 @@ function ShellMomentWorkspace()
     )
 end
 
-const _MOMENT_WS = ShellMomentWorkspace[ShellMomentWorkspace() for _ in 1:Threads.nthreads()]
+# Per-thread pool, filled in `Asap.__init__` (see threading.jl).
+const _MOMENT_WS = ShellMomentWorkspace[]
 
 """Fill plane-stress D matrix in-place."""
 function _plane_stress_D!(D::Matrix{Float64}, E::Float64, ν::Float64)
@@ -818,7 +886,7 @@ writing into the pre-allocated 3-vector `M`.  **Zero heap allocations.**
 """
 function bending_moments!(M::AbstractVector{Float64}, elem::ShellTri3,
                           u_global::Vector{Float64},
-                          ws::ShellMomentWorkspace = _MOMENT_WS[Threads.threadid()])
+                          ws::ShellMomentWorkspace = _thread_buffer(_MOMENT_WS))
     # Extract element DOFs
     fill!(ws.u_elem, 0.0)
     @inbounds for i in 1:3

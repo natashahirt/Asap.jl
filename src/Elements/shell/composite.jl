@@ -205,12 +205,8 @@ function local_K(elem::CompositeShellTri3)
         end
     end
     
-    # --- Drilling DOF stabilization ---
-    kavg = _mean([K[4,4], K[5,5], K[10,10], K[11,11], K[16,16], K[17,17]])
-    drilling_scale = 1.0
-    K[6, 6] += kavg * drilling_scale
-    K[12, 12] += kavg * drilling_scale
-    K[18, 18] += kavg * drilling_scale
+    # Same equilibrated drilling penalty as ShellTri3, at the default scale.
+    _add_equilibrated_drilling!(K, gradN_e, 1.0)
     
     return K
 end

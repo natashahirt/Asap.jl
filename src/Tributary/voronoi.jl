@@ -79,7 +79,7 @@ function compute_voronoi_tributaries(
         voronoi_poly = _get_voronoi_polygon(vorn, i)
         
         if isnothing(voronoi_poly) || isnothing(boundary_poly)
-            # Fallback: equal division
+            @warn "Voronoi cell unavailable; vertex gets an equal share of the boundary area" vertex_idx=i n_vertices=n
             area = _voronoi_polygon_area(boundary_pts) / n
             push!(tributaries, VertexTributary(i, NTuple{2,Float64}[], area, :corner))
             continue
@@ -89,7 +89,7 @@ function compute_voronoi_tributaries(
         clipped = _clip_to_boundary(voronoi_poly, boundary_poly)
         
         if isnothing(clipped)
-            # Intersection failed, use small fallback
+            # The cell lies entirely outside the boundary.
             push!(tributaries, VertexTributary(i, NTuple{2,Float64}[], 0.0, :corner))
             continue
         end
@@ -136,14 +136,13 @@ function _create_meshes_polygon(verts::Vector{NTuple{2, Float64}})
     end
 end
 
-"""Clip polygon to boundary using Meshes.jl intersection."""
-function _clip_to_boundary(poly::Meshes.Geometry, boundary::Meshes.Geometry)
-    try
-        return poly ∩ boundary
-    catch
-        return nothing
-    end
-end
+"""
+Clip polygon to boundary using Meshes.jl intersection.
+
+Returns `nothing` when the two do not overlap. A clipping error propagates,
+because returning `nothing` for it would drop that vertex's tributary load.
+"""
+_clip_to_boundary(poly::Meshes.Geometry, boundary::Meshes.Geometry) = poly ∩ boundary
 
 """Extract vertices from Meshes geometry as tuples."""
 function _extract_polygon_vertices(geom)
@@ -177,21 +176,15 @@ function _extract_polygon_vertices(geom)
     return verts
 end
 
-"""Get area from Meshes geometry."""
+"""
+Area of a Meshes geometry in m². `nothing` (no overlap) has zero area; a
+measure error propagates so a tributary is never silently zeroed.
+"""
 function _meshes_area(geom)
     isnothing(geom) && return 0.0
-    
-    try
-        # Handle Multi geometries
-        if geom isa Meshes.Multi
-            return sum(_meshes_area(part) for part in geom)
-        end
-        
-        m = Meshes.measure(geom)
-        return m isa Unitful.Quantity ? Float64(ustrip(u"m^2", m)) : Float64(m)
-    catch
-        return 0.0
-    end
+    geom isa Meshes.Multi && return sum(_meshes_area(part) for part in geom)
+    m = Meshes.measure(geom)
+    return m isa Unitful.Quantity ? Float64(ustrip(u"m^2", m)) : Float64(m)
 end
 
 """Classify vertex position based on polygon geometry."""

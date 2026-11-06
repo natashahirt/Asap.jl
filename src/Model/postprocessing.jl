@@ -23,7 +23,10 @@ function reactions!(model::FrameModel)
     else
         model.reactions = zeros(model.nDOFs)
     end
-    model.reactions[model.fixedDOFs] = _fixed_Ku(model) + model.Pf[model.fixedDOFs]
+    # Equilibrium at restrained DOFs:
+    # reaction = K*u - (P - Pf) = K*u - P + Pf.
+    model.reactions[model.fixedDOFs] =
+        _fixed_Ku(model) - model.P[model.fixedDOFs] + model.Pf[model.fixedDOFs]
 end
 
 function reactions!(model::ShellModel)
@@ -43,7 +46,8 @@ function reactions!(model::Model)
     else
         model.reactions = zeros(model.nDOFs)
     end
-    model.reactions[model.fixedDOFs] = _fixed_Ku(model) + model.Pf[model.fixedDOFs]
+    model.reactions[model.fixedDOFs] =
+        _fixed_Ku(model) - model.P[model.fixedDOFs] + model.Pf[model.fixedDOFs]
 end
 
 function reactions!(model::TrussModel)
@@ -52,7 +56,7 @@ function reactions!(model::TrussModel)
     else
         model.reactions = zeros(model.nDOFs)
     end
-    model.reactions[model.fixedDOFs] = _fixed_Ku(model)
+    model.reactions[model.fixedDOFs] = _fixed_Ku(model) - model.P[model.fixedDOFs]
 end
 
 # =============================================================================

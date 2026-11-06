@@ -83,6 +83,26 @@ using Unitful
             @test max_disps[i] >= max_disps[i-1]
         end
     end
+
+    @testset "Distributed load fixed-end actions are applied once" begin
+        L = 4.0u"m"
+        E = 200.0u"GPa"
+        I = 1.0e-4u"m^4"
+        section = Section(
+            0.01u"m^2", E, 80.0u"GPa", I, I, 1.0e-5u"m^4")
+        root = Node([0.0u"m", 0.0u"m", 0.0u"m"], :fixed)
+        tip = Node([L, 0.0u"m", 0.0u"m"], :free)
+        element = Element(root, tip, section)
+        load = LineLoad(element, [0.0u"N/m", -1000.0u"N/m", 0.0u"N/m"])
+        model = FrameModel([root, tip], [element], [load])
+
+        result = solve_nonlinear!(model; n_steps=4, tol=1e-8)
+
+        @test result.converged
+        @test result.displacements[end][tip.globalID[2]] ≈ -0.0016 rtol=1e-5
+        @test model.reactions[root.globalID[2]] ≈ 4000.0 rtol=1e-6
+        @test abs(model.reactions[root.globalID[6]]) ≈ 8000.0 rtol=1e-6
+    end
     
     @testset "Convergence Tracking" begin
         L = 3.0u"m"

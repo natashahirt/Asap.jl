@@ -337,6 +337,27 @@ const IN3_TO_M3 = IN_TO_M^3
 const IN4_TO_M4 = IN_TO_M^4
 const IN6_TO_M6 = IN_TO_M^6
 
+# Stripped from Unitful so bare-number code matches `ft`, `lbf`, `kip`, `psi`, `ksi`, and `psf`.
+# 1 kip = 1000 lbf and 1 ksi = 1000 psi, so the kilo factors are the base factors × 1000.
+
+"""Meters per international foot."""
+const FT_TO_M = Float64(ustrip(u"m", 1.0u"ft"))
+
+"""Newtons per pound-force."""
+const LBF_TO_N = Float64(ustrip(u"N", 1.0u"lbf"))
+
+"""Newtons per kip."""
+const KIP_TO_N = Float64(ustrip(u"N", 1.0kip))
+
+"""Pascals per psi."""
+const PSI_TO_PA = Float64(ustrip(u"Pa", 1.0u"psi"))
+
+"""Pascals per ksi."""
+const KSI_TO_PA = Float64(ustrip(u"Pa", 1.0ksi))
+
+"""Pascals per psf."""
+const PSF_TO_PA = Float64(ustrip(u"Pa", 1.0psf))
+
 # =============================================================================
 # CSV/Catalog Parsing Utilities
 # =============================================================================

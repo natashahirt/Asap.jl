@@ -104,7 +104,7 @@ using Unitful
         eigvals_K = eigvals(Symmetric(elem.K))
         @test all(eigvals_K .>= -1e-6 * maximum(eigvals_K))
         
-        # Should have at least 6 rigid body modes (plus extras from drilling stabilization)
+        # At least the six rigid-body modes. The in-plane rotation is one of them.
         rbm_count = count(x -> abs(x) < 1e-3 * maximum(abs, eigvals_K), eigvals_K)
         @test rbm_count >= 6
         

@@ -164,6 +164,73 @@ using Asap: get_polygon_span, SpanInfo, governing_spans, short_span, long_span, 
         @test span_zero ≈ sqrt(10^2 + 6^2) atol=1e-9
     end
     
+    @testset "Directional span does not jump a notch" begin
+        # Two 4 m rooms joined by a 4 m connector, plus a 1 m flag up the left side.
+        # A ray from (6,10) toward -x leaves the slab and lands on the flag (9 m);
+        # the longest horizontal piece actually inside is 7 m.
+        verts = [point2d(0, 0), point2d(4, 0), point2d(4, 3), point2d(7, 3),
+                 point2d(7, 6), point2d(10, 6), point2d(10, 10), point2d(6, 10),
+                 point2d(6, 7), point2d(3, 7), point2d(3, 4), point2d(1, 4),
+                 point2d(1, 10), point2d(0, 10)]
+        @test get_polygon_span(verts; axis=[1.0, 0.0]) ≈ 7.0 atol=1e-9
+        @test get_polygon_span(verts; axis=[0.0, 1.0]) ≈ 10.0 atol=1e-9
+    end
+
+    @testset "Notch tips touching one line end the span" begin
+        # Notches from the top (tips at x=3, 7) and bottom (tip at x=5) all reach y=5.
+        # The y=5 line only touches the tips; every real strip beside it is cut at 5 m.
+        verts = [point2d(0, 0), point2d(4, 0), point2d(5, 5), point2d(6, 0),
+                 point2d(10, 0), point2d(10, 10), point2d(8, 10), point2d(7, 5),
+                 point2d(6, 10), point2d(4, 10), point2d(3, 5), point2d(2, 10),
+                 point2d(0, 10)]
+        @test get_polygon_span(verts; axis=[1.0, 0.0]) ≈ 5.0 atol=1e-9
+    end
+
+    @testset "Single notch tip does not cut the strip below it" begin
+        # V-notch from the top with its tip at (5,5): strips just below run 10 m.
+        verts = [point2d(0, 0), point2d(10, 0), point2d(10, 10), point2d(6, 10),
+                 point2d(5, 5), point2d(4, 10), point2d(0, 10)]
+        @test get_polygon_span(verts; axis=[1.0, 0.0]) ≈ 10.0 atol=1e-9
+    end
+
+    @testset "Voids" begin
+        sq = [point2d(0, 0), point2d(10, 0), point2d(10, 10), point2d(0, 10)]
+
+        # Interior void [4,6]×[1,9]: strips below y=1 and beside the void still run 10 m.
+        hole = [(4.0, 1.0), (6.0, 1.0), (6.0, 9.0), (4.0, 9.0)]
+        @test get_polygon_span(sq; axis=[1.0, 0.0], holes=[hole]) ≈ 10.0 atol=1e-9
+        @test get_polygon_span(sq; axis=[0.0, 1.0], holes=[hole]) ≈ 10.0 atol=1e-9
+        iso = get_polygon_span(sq; holes=[hole])
+        @test iso < 10 * sqrt(2) - 0.1          # both diagonals pass through the void
+        @test iso >= sqrt(101) - 1e-9           # (0,0)→(10,1) passes under it
+
+        # Void straddling the slab edge splits it into two 4 m wide rooms.
+        cut = [point2d(4, -1), point2d(6, -1), point2d(6, 11), point2d(4, 11)]
+        @test get_polygon_span(sq; axis=[1.0, 0.0], holes=[cut]) ≈ 4.0 atol=1e-9
+        @test get_polygon_span(sq; axis=[0.0, 1.0], holes=[cut]) ≈ 10.0 atol=1e-9
+
+        si = SpanInfo(sq; holes=[cut])
+        @test si.primary ≈ 4.0 atol=1e-9
+        @test si.axis == (1.0, 0.0)
+    end
+
+    @testset "Isotropic span around a notch" begin
+        # U-shape: corner-to-corner diagonals cross the notch. The longest inside
+        # segment runs from (0,10) past the inner corner (3,3) to (30/7, 0), which
+        # is longer than any corner-to-corner segment that stays inside.
+        verts = [point2d(0, 0), point2d(10, 0), point2d(10, 10), point2d(7, 10),
+                 point2d(7, 3), point2d(3, 3), point2d(3, 10), point2d(0, 10)]
+        @test get_polygon_span(verts) ≈ sqrt(100 + (30 / 7)^2) atol=1e-9
+    end
+
+    @testset "Collinear and repeated vertices" begin
+        verts = [point2d(0, 0), point2d(5, 0), point2d(10, 0), point2d(10, 6),
+                 point2d(0, 6), point2d(0, 0)]
+        @test get_polygon_span(verts; axis=[1.0, 0.0]) ≈ 10.0 atol=1e-9
+        @test get_polygon_span(verts; axis=[0.0, 1.0]) ≈ 6.0 atol=1e-9
+        @test get_polygon_span(verts) ≈ sqrt(136) atol=1e-9
+    end
+
     # =========================================================================
     # SpanInfo Tests
     # =========================================================================
