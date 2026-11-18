@@ -28,8 +28,12 @@ Encapsulates span information for a slab bay or cell.
 
 ## Notes
 - For one-way systems, use `primary` for sizing
-- For two-way systems, use `max(primary, secondary)` (spans along the reinforcement)
-- `axis` indicates the direction loads span (perpendicular to supporting beams)
+- For two-way systems, use [`longer_axis_span`](@ref): the longer of the two
+  reinforcement-axis spans. `isotropic` is the longest segment in any
+  direction, which is the diagonal of a rectangle, not a reinforcement span
+- `axis` is the primary reinforcement direction. With no given axis it follows
+  the slab's orthogonal edge frame, and falls back to global x when the edges
+  do not share one frame
 """
 struct SpanInfo{T}
     primary::T
@@ -46,7 +50,8 @@ Compute SpanInfo from polygon vertices.
 ## Arguments
 - `verts::Vector{<:Point}`: Polygon vertices as Meshes.Point objects
 - `axis::Union{Nothing, NTuple{2,Float64}}`: Optional primary span direction.
-  If `nothing`, auto-detects short axis from the x and y spans.
+  If `nothing`, the short axis of the slab's orthogonal edge frame. A bay
+  whose edges do not share one frame (a skewed parallelogram) keeps global x.
 - `holes`: Optional voids, each a vertex loop (`Point`s or `(x, y)` in meters).
 
 ## Returns
@@ -59,15 +64,19 @@ function SpanInfo(verts::Vector{<:Point};
     iso = _span_isotropic(outer, hs)
 
     if isnothing(axis)
-        # Auto-detect: primary = short axis
-        span_x = _span_directional(outer, hs, (1.0, 0.0))
-        span_y = _span_directional(outer, hs, (0.0, 1.0))
-        if span_x <= span_y
-            primary, secondary = span_x, span_y
-            axis = (1.0, 0.0)
+        # Short axis of the orthogonal frame the edges agree on. Global x
+        # when they do not, which is the historical span pair.
+        frame = _orthogonal_frame_axis(outer)
+        ax = something(frame, (1.0, 0.0))
+        perp = (-ax[2], ax[1])
+        along = _span_directional(outer, hs, ax)
+        across = _span_directional(outer, hs, perp)
+        if along <= across
+            primary, secondary = along, across
+            axis = ax
         else
-            primary, secondary = span_y, span_x
-            axis = (0.0, 1.0)
+            primary, secondary = across, along
+            axis = perp
         end
     else
         ax = (Float64(axis[1]), Float64(axis[2]))
@@ -87,29 +96,88 @@ end
 """
     governing_spans(span_infos::Vector{SpanInfo{T}}) -> SpanInfo{T}
 
-Compute governing SpanInfo from multiple cells (e.g., for a multi-cell slab).
-Takes the maximum of each span component across all inputs.
+Governing spans of several cells that share one reinforcement frame.
 
-## Notes
-- Uses the axis from the first SpanInfo (assumes consistent orientation)
-- For mixed orientations, consider computing spans per-axis separately
+Each cell's spans are taken along the first cell's axis and the perpendicular,
+so a cell whose primary axis is turned 90° still contributes its span to the
+right direction. Cells whose axes are neither parallel nor perpendicular do
+not share a frame, and this throws rather than pairing unrelated spans.
+
+`primary` stays the span along the first cell's axis. It is not re-sorted to
+be the shorter one.
 """
 function governing_spans(span_infos::Vector{SpanInfo{T}}) where T
     isempty(span_infos) && error("Cannot compute governing spans from empty vector")
     length(span_infos) == 1 && return span_infos[1]
 
-    primary = maximum(si.primary for si in span_infos)
-    secondary = maximum(si.secondary for si in span_infos)
-    isotropic = maximum(si.isotropic for si in span_infos)
-    axis = span_infos[1].axis  # Use first cell's axis as reference
-
-    SpanInfo{T}(primary, secondary, axis, isotropic)
+    ref = span_infos[1].axis
+    along = span_infos[1].primary
+    across = span_infos[1].secondary
+    isotropic = span_infos[1].isotropic
+    for si in @view span_infos[2:end]
+        d = abs(si.axis[1] * ref[1] + si.axis[2] * ref[2])
+        if d >= 1 - 1e-6
+            along = max(along, si.primary)
+            across = max(across, si.secondary)
+        elseif d <= 1e-6
+            along = max(along, si.secondary)
+            across = max(across, si.primary)
+        else
+            throw(ArgumentError(
+                "cells in one slab do not share a reinforcement axis: " *
+                "$(ref) and $(si.axis)"))
+        end
+        isotropic = max(isotropic, si.isotropic)
+    end
+    return SpanInfo{T}(along, across, ref, isotropic)
 end
 
 # Convenience accessors
 short_span(si::SpanInfo) = si.primary
 long_span(si::SpanInfo) = si.secondary
 two_way_span(si::SpanInfo) = si.isotropic
+
+"""
+    longer_axis_span(si) -> span
+
+Longer of the two reinforcement-axis spans. Two-way minimum thickness uses
+this where a code table says "the longer span". It is not [`two_way_span`](@ref),
+which is the longest segment in any direction, and it is not the clear
+distance between column faces.
+"""
+longer_axis_span(si::SpanInfo) = max(si.primary, si.secondary)
+
+"""
+Unit axis of the orthogonal frame the boundary edges agree on, or `nothing`.
+
+Edge directions fold into a right angle, because a reinforcement pair repeats
+every 90°, and each edge votes with its length. A frame within half a degree
+of the global axes snaps to `(1, 0)`, so an axis-aligned bay keeps that exact
+tuple. Edges that do not agree (a skewed parallelogram, a fan of curve
+facets) return `nothing` and the caller keeps the global axes.
+"""
+function _orthogonal_frame_axis(outer)::Union{Nothing, NTuple{2, Float64}}
+    length(outer) < 3 && return nothing
+    s = 0.0
+    c = 0.0
+    w = 0.0
+    n = length(outer)
+    @inbounds for i in 1:n
+        p, q = outer[i], outer[mod1(i + 1, n)]
+        dx, dy = q[1] - p[1], q[2] - p[2]
+        L = hypot(dx, dy)
+        L <= 1e-9 && continue
+        α = mod(atan(dy, dx), π / 2)
+        s += L * sin(4α)
+        c += L * cos(4α)
+        w += L
+    end
+    w <= 1e-9 && return nothing
+    hypot(s, c) / w < 0.95 && return nothing
+    θ = mod(atan(s, c), 2π) / 4
+    min(θ, π / 2 - θ) < deg2rad(0.5) && return (1.0, 0.0)
+    return (cos(θ), sin(θ))
+end
 
 # =============================================================================
 # Public Span Function

@@ -3,7 +3,8 @@
 # =============================================================================
 
 """
-    get_tributary_polygons_isotropic(vertices; weights=nothing, holes=nothing)
+    get_tributary_polygons_isotropic(vertices; weights=nothing, holes=nothing,
+                                    hole_supports=nothing)
 
 Compute tributary polygons using straight skeleton with DCEL data structure.
 
@@ -13,8 +14,11 @@ Compute tributary polygons using straight skeleton with DCEL data structure.
 - `weights::Union{Nothing, AbstractVector{<:Real}}`: Optional edge weights (one per edge).
   Higher weight = faster shrink = smaller tributary area. Default `nothing` = all weights 1.0.
 - `holes`: Optional openings, each a vertex loop (`Point`s or `(x, y)` in meters).
-  An opening edge is not a support. The skeleton grows from the supported
+  A free opening is not a support. The skeleton grows from the supported
   edges only, and each edge's region loses the part inside an opening.
+- `hole_supports`: One flag per hole. `true` is a beam ring: its edges are
+  wavefront edges and carry the slab between the ring and the skeleton.
+  `false`, or `nothing`, leaves the hole a void.
 
 ## Returns
 `Vector{TributaryPolygon}` in parametric form. All length values (`d`, `area`) are in meters.
@@ -23,14 +27,16 @@ Areas are net of openings and sum to the net floor area; this throws otherwise.
 
 At a re-entrant corner an edge's region runs past the edge's end. That part
 is folded back onto the edge about the end ([`_edge_slice_profile`](@ref)).
-The wavefront has edge events only, with no split events, so the regions of a
-concave face can differ from the true straight skeleton. They still tile the
-face, and the balance check still holds.
+With equal weights the wavefront has edge and split events
+([`_propagate_isotropic!`](@ref)), so a concave face gets its true straight
+skeleton. Unequal weights use edge events only, so a weighted concave face
+can differ from the weighted skeleton.
 """
 function get_tributary_polygons_isotropic(
     vertices::Vector{<:Point};
     weights::Union{Nothing, AbstractVector{<:Real}} = nothing,
-    holes = nothing
+    holes = nothing,
+    hole_supports::Union{Nothing, AbstractVector{Bool}} = nothing
 )
     m = length(vertices)  # Original vertex count
     m >= 3 || return TributaryPolygon[]
@@ -134,6 +140,31 @@ function get_tributary_polygons_isotropic(
     
     # Track which original edges are still active
     edge_active = trues(n)
+
+    ring_face = Int[]
+    ring_ends = NTuple{2, NTuple{2,Float64}}[]
+    hole_loops_s, hole_flags = _supported_holes(holes, hole_supports)
+    supported = [loop for (loop, flag) in zip(hole_loops_s, hole_flags) if flag]
+
+    if !isempty(supported)
+        is_isotropic || error(
+            "a two-way beam ring needs equal edge weights. Unequal weights have no ring skeleton.")
+        id0 = n
+        hole_fronts = Tuple{Vector{NTuple{2,Float64}}, Vector{Int}}[]
+        for loop in supported
+            hpts, hem, ends = _cw_hole_front(loop, id0)
+            _add_hole_boundary!(dcel, registry, hpts, hem)
+            push!(hole_fronts, (hpts, hem))
+            append!(ring_face, (id0 + 1):(id0 + length(loop)))
+            append!(ring_ends, ends)
+            id0 += length(loop)
+        end
+        _propagate_with_holes!(dcel, registry, current_pts, edge_map, hole_fronts)
+        n_active = 0
+    elseif is_isotropic
+        _propagate_isotropic!(dcel, registry, current_pts, edge_map)
+        n_active = 0
+    end
     
     while n_active > 2
         if is_isotropic
@@ -454,10 +485,14 @@ function get_tributary_polygons_isotropic(
         end
     end
     
+    isempty(ring_ends) || append!(results, _ring_tributaries(dcel, pts_orig, ring_face, ring_ends))
+
     # Sort results by edge index
     sort!(results, by=r -> r.local_edge_idx)
     results = [_with_fraction(r, net_area > 0 ? r.area / net_area : 0.0) for r in results]
-    assert_tributary_balance(results, pts_orig, net_area; context = " (two-way)")
+    lengths = isempty(ring_ends) ? nothing : _outer_and_ring_lengths(pts_orig, ring_ends)
+    assert_tributary_balance(results, pts_orig, net_area; context = " (two-way)",
+                             edge_lengths = lengths)
     return results
 end
 

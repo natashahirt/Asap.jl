@@ -71,6 +71,7 @@ function ElementForceAndDisplacement(element::AbstractElement, loads::AbstractVe
     @inbounds for i in 1:12
         _ul[i] *= dofs[i]
     end
+    release_end_rotations!(_ul, element, L)
 
     uX1 = _ul[1];  uX2 = _ul[7]
     uY1 = _ul[2];  uY2 = _ul[6];  uY3 = _ul[8];  uY4 = _ul[12]

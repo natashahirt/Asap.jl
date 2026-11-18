@@ -1105,8 +1105,16 @@ end
         @test Vy_trib > 1000.0  # Should have significant shear
         @test Vy_shell < 10.0   # Near-zero in shell model (load bypasses beams)
         
-        # Moments should be same order of magnitude (within 2.5× is physical for stiff slab)
-        @test isapprox(abs(My_mid_shell), abs(My_mid_trib), rtol=0.6)
+        # The shell-model beams carry almost no load, so their moment is not a
+        # reference. The tributary beam on flexible columns lies between the
+        # fixed-fixed and simply supported midspan moments of its trapezoid
+        # (peak w over the middle, ramps of length a at each end):
+        #   M_ss = w (3L² - 4a²) / 24,  M_end = w L² (1 - 2(a/L)² + (a/L)³) / 12.
+        w_pk = expected_max_intensity
+        a_r = expected_max_width
+        M_ss = w_pk * (3Lx^2 - 4a_r^2) / 24
+        M_end = w_pk * Lx^2 * (1 - 2(a_r / Lx)^2 + (a_r / Lx)^3) / 12
+        @test M_ss - M_end < abs(My_mid_trib) < M_ss
     end
     
     @testset "Equilibrium check: reactions balance applied load" begin

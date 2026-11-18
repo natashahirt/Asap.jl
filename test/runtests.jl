@@ -20,6 +20,7 @@ Unitful.register(Asap)
     @testset "Elements" begin
         include("elements/test_beam_features.jl")
         include("elements/test_spring.jl")
+        include("elements/test_with_releases.jl")
         include("element_stiffness/test_released_stiffness.jl")
         include("rigidlink/test_rigidlink.jl")
         
@@ -32,6 +33,7 @@ Unitful.register(Asap)
         include("elements/shell/test_scordelis_lo.jl")
         include("elements/shell/test_vault_shell.jl")
         include("elements/shell/test_meshing.jl")
+        include("elements/shell/test_degenerate_shells.jl")
         include("elements/shell/test_interior_supports.jl")
         include("elements/shell/test_diaphragm.jl")
     end
@@ -41,8 +43,10 @@ Unitful.register(Asap)
     # =========================================================================
     @testset "Loads" begin
         include("loads/test_tributary_load.jl")
+        include("loads/test_tributary_release_fields.jl")
         include("loads/test_quadratic_fem.jl")
         include("loads/test_area_load.jl")
+        include("loads/test_polygon_split.jl")
     end
     
     # =========================================================================

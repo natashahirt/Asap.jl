@@ -106,7 +106,7 @@ end
 # =============================================================================
 
 """
-    update!(model; values_only=false)
+    update!(model; values_only=false, loads_only=false, geometry=false)
 
 Rebuild element stiffness matrices, load vector, and global stiffness
 matrix after property or load changes.  Topology must be unchanged
@@ -115,8 +115,8 @@ matrix after property or load changes.  Topology must be unchanged
 # Keyword arguments
 - `values_only=false` (default): full property update — recomputes element
   geometry (LCS, R, length), stiffness K, loads P, and reassembles S from
-  COO triplets.  Use after node positions moved or section connectivity
-  changed.
+  COO triplets.  Drops the symbolic factorization.  Use when element
+  connectivity changed.
 
 - `values_only=true`: lightweight update — only recomputes element K
   matrices from current section/material properties and rebuilds P.
@@ -124,8 +124,14 @@ matrix after property or load changes.  Topology must be unchanged
   sparse reconstruction), and the next solve refactors `S` reusing the
   previous symbolic analysis.  Use when only E, t, ν, I, A, or load
   magnitudes changed but geometry is unchanged.
+
+- `geometry=true`: node positions moved, connectivity did not. Recomputes
+  element geometry and K, scatters K into the existing sparsity pattern,
+  and keeps the symbolic factorization. Requires a model that has already
+  been processed.
 """
-function update!(model::FrameModel; values_only::Bool = false, loads_only::Bool = false)
+function update!(model::FrameModel; values_only::Bool = false, loads_only::Bool = false,
+                 geometry::Bool = false)
     for element in model.elements
         element isa Element && fill!(element.Q, 0.0)
     end
@@ -133,6 +139,12 @@ function update!(model::FrameModel; values_only::Bool = false, loads_only::Bool 
     if loads_only
         # Only load magnitudes changed — K and S untouched, keep factorization
         populate_loads!(model)
+    elseif geometry
+        # Node positions moved. Same elements and DOFs, so the pattern stands.
+        process_elements!(model)
+        populate_loads!(model)
+        _update_S_values!(model)
+        _invalidate_factor_values!(model)
     elseif values_only
         # K-only pass: skip lcs!, R!, length! — geometry unchanged
         for element in model.elements
@@ -153,7 +165,8 @@ function update!(model::FrameModel; values_only::Bool = false, loads_only::Bool 
     model.processed = true
 end
 
-function update!(model::Model; values_only::Bool = false, loads_only::Bool = false)
+function update!(model::Model; values_only::Bool = false, loads_only::Bool = false,
+                 geometry::Bool = false)
     for element in model.frame_elements
         element isa Element && fill!(element.Q, 0.0)
     end
@@ -161,6 +174,11 @@ function update!(model::Model; values_only::Bool = false, loads_only::Bool = fal
     if loads_only
         # Only load magnitudes changed — K and S untouched, keep factorization
         populate_loads!(model)
+    elseif geometry
+        process_elements!(model)
+        populate_loads!(model)
+        _update_S_values!(model)
+        _invalidate_factor_values!(model)
     elseif values_only
         # K-only pass: skip geometry — reuse existing LCS, R, length, area
         for element in model.frame_elements
@@ -183,10 +201,16 @@ function update!(model::Model; values_only::Bool = false, loads_only::Bool = fal
     model.processed = true
 end
 
-function update!(model::ShellModel; values_only::Bool = false, loads_only::Bool = false)
+function update!(model::ShellModel; values_only::Bool = false, loads_only::Bool = false,
+                 geometry::Bool = false)
     if loads_only
         # Only load magnitudes changed — K and S untouched, keep factorization
         populate_loads!(model)
+    elseif geometry
+        process_elements!(model)
+        populate_loads!(model)
+        _update_S_values!(model)
+        _invalidate_factor_values!(model)
     elseif values_only
         # Shell global_K! is thread-safe (writes only to per-element fields)
         _recompute_shell_K!(model.elements)
@@ -203,10 +227,16 @@ function update!(model::ShellModel; values_only::Bool = false, loads_only::Bool 
     model.processed = true
 end
 
-function update!(model::TrussModel; values_only::Bool = false, loads_only::Bool = false)
+function update!(model::TrussModel; values_only::Bool = false, loads_only::Bool = false,
+                 geometry::Bool = false)
     if loads_only
         # Only load magnitudes changed — K and S untouched, keep factorization
         populate_loads!(model)
+    elseif geometry
+        process_elements!(model)
+        populate_loads!(model)
+        _update_S_values!(model)
+        _invalidate_factor_values!(model)
     elseif values_only
         for element in model.elements
             global_K!(element)
@@ -222,6 +252,27 @@ function update!(model::TrussModel; values_only::Bool = false, loads_only::Bool 
     end
 
     model.processed = true
+end
+
+"""
+    stale_frame_elements(model; rtol = 1e-9) -> Vector{Int}
+
+Indices of the frame elements whose stored stiffness `K` differs from the one
+their current section and release give. Such an element got a new section
+without [`update!`](@ref) or [`process!`](@ref), so a solve still uses the old
+stiffness. The model is left unchanged.
+"""
+function stale_frame_elements(model::Union{Model, FrameModel}; rtol::Real = 1e-9)
+    stale = Int[]
+    for (i, el) in enumerate(_frame_elements(model))
+        el isa Element || continue
+        stored = copy(el.K)
+        global_K!(el)
+        scale = max(norm(stored), norm(el.K))
+        scale > 0 && norm(el.K - stored) > rtol * scale && push!(stale, i)
+        copyto!(el.K, stored)
+    end
+    return stale
 end
 
 

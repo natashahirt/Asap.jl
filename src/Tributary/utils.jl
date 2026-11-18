@@ -303,18 +303,30 @@ end
 [`_slice_profile`](@ref) of a region in its edge's frame, on `[0, 1]`. A part
 past an end is mirrored back onto the edge about that end: a straight-skeleton
 region runs past its edge at a re-entrant corner, and that load belongs at the
-corner, so it stays on this edge beside the support. `area` is the whole
-region's `∫ width ds`.
+corner, so it stays on this edge beside the support. A part longer than the
+edge folds back and forth between the ends until it lies on the edge, so the
+profile still carries all of it. `area` is the whole region's `∫ width ds`.
 """
 function _edge_slice_profile(poly::Vector{NTuple{2,Float64}},
                              holes::Vector{Vector{NTuple{2,Float64}}})
     pos, w, _, total, outside = _slice_profile(poly, holes, 0.0, 1.0)
     isempty(outside) && return pos, w, total
     profiles = [(pos, w)]
+    fold(s) = (r = mod(s, 2.0); r <= 1.0 ? r : 2.0 - r)
     for (a, fa, b, fb) in outside
-        a2, fa2, b2, fb2 = b <= 0.0 ? (-b, fb, -a, fa) : (2.0 - b, fb, 2.0 - a, fa)
-        a2, b2 = clamp(a2, 0.0, 1.0), clamp(b2, 0.0, 1.0)
-        push!(profiles, ([0.0, a2, a2, b2, b2, 1.0], [0.0, 0.0, fa2, fb2, 0.0, 0.0]))
+        b > a || continue
+        cuts = vcat(a, collect(Float64, ceil(a):floor(b)), b)
+        unique!(sort!(cuts))
+        for k in 1:(length(cuts) - 1)
+            s0, s1 = cuts[k], cuts[k + 1]
+            s1 > s0 || continue
+            f0 = fa + (fb - fa) * (s0 - a) / (b - a)
+            f1 = fa + (fb - fa) * (s1 - a) / (b - a)
+            # Between two whole numbers the fold is one linear map.
+            g0, g1 = fold(s0), fold(s1)
+            lo, flo, hi, fhi = g0 <= g1 ? (g0, f0, g1, f1) : (g1, f1, g0, f0)
+            push!(profiles, ([0.0, lo, lo, hi, hi, 1.0], [0.0, 0.0, flo, fhi, 0.0, 0.0]))
+        end
     end
     p, ww = _sum_profiles(profiles)
     return p, ww, total
@@ -713,11 +725,12 @@ function _make_tributary_with_depths(edge_idx::Int, verts::Vector{NTuple{2,Float
                                      original_pts::Vector{NTuple{2,Float64}}, area::Float64, 
                                      frac::Float64;
                                      profile = nothing,
+                                     ends::Union{Nothing, NTuple{2, NTuple{2,Float64}}} = nothing,
                                      holes::Vector{Vector{NTuple{2,Float64}}} = Vector{NTuple{2,Float64}}[]
                                      )::TributaryPolygon
     n = length(original_pts)
-    a = original_pts[edge_idx]
-    b = original_pts[mod1(edge_idx + 1, n)]
+    a, b = ends === nothing ?
+        (original_pts[edge_idx], original_pts[mod1(edge_idx + 1, n)]) : ends
     
     # Compute parametric representation
     if isempty(verts)
@@ -736,8 +749,10 @@ function _make_tributary_with_depths(edge_idx::Int, verts::Vector{NTuple{2,Float
         isempty(holes) || (area = net * hypot(b[1] - a[1], b[2] - a[2]))
     end
     
-    # Compute cell boundary depths (includes l2_stiff via cubic mean)
-    cell = compute_cell_depths(original_pts, edge_idx)
+    # Cell-boundary depths are the outer panel's EFM width. A ring edge is not
+    # an edge of that panel, so it keeps an empty depth record.
+    cell = ends === nothing ? compute_cell_depths(original_pts, edge_idx) :
+        (s_vals = Float64[], depths = Float64[], l2_stiff = 0.0, max = 0.0, s_max = 0.0)
     
     TributaryPolygon(edge_idx, s, d, area, frac,
                      cell.s_vals, cell.depths, cell.l2_stiff,
@@ -752,23 +767,31 @@ Throw unless every edge's load profile carries its area and the areas sum to
 """
 function assert_tributary_balance(tribs::Vector{TributaryPolygon},
                                   pts::Vector{NTuple{2,Float64}}, net_area::Float64;
-                                  context::AbstractString = "")
+                                  context::AbstractString = "",
+                                  edge_lengths::Union{Nothing, AbstractVector{<:Real}} = nothing)
     n = length(pts)
     tol = 1e-6 * max(net_area, 1.0)
     total = 0.0
     for t in tribs
         i = t.local_edge_idx
-        L = hypot(pts[mod1(i + 1, n)][1] - pts[i][1], pts[mod1(i + 1, n)][2] - pts[i][2])
+        L = edge_lengths === nothing ?
+            hypot(pts[mod1(i + 1, n)][1] - pts[i][1], pts[mod1(i + 1, n)][2] - pts[i][2]) :
+            Float64(edge_lengths[i])
         carried = profile_area(t, L)
         abs(carried - t.area) <= tol || error(
             "Tributary of edge $i$(context) has area $(t.area) m² but its load profile " *
             "carries $carried m². The rest of that floor would reach no beam.")
         total += t.area
     end
-    abs(total - net_area) <= tol || error(
-        "Tributaries$(context) sum to $total m² on a floor of $net_area m². " *
-        "The partition " * (total < net_area ? "misses" : "double counts") *
-        " $(abs(total - net_area)) m².")
+    if abs(total - net_area) > tol
+        shown = length(pts) <= 16 ?
+            [(round(p[1]; digits = 2), round(p[2]; digits = 2)) for p in pts] :
+            "$(length(pts)) vertices"
+        areas = [(t.local_edge_idx, round(t.area; digits = 2)) for t in tribs if t.area > 0.5]
+        error("Tributaries$(context) sum to $total m² on a floor of $net_area m². " *
+              "The partition " * (total < net_area ? "misses" : "double counts") *
+              " $(abs(total - net_area)) m². outline=$shown edges=$areas")
+    end
     return nothing
 end
 

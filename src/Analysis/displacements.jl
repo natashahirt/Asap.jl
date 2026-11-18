@@ -58,6 +58,7 @@ function unodal(element::Element; n::Integer = 20)
     end
 
     L = ustrip(u"m", element.length)
+    release_end_rotations!(_ul, element, L)
 
     uX1 = _ul[1];  uX2 = _ul[7]
     uY1 = _ul[2];  uY2 = _ul[6];  uY3 = _ul[8];  uY4 = _ul[12]
@@ -151,7 +152,8 @@ end
 """
 Accumulate the displacement caused by a TributaryLoad to an element.
 TributaryLoad represents a piecewise linear distributed load based on tributary widths.
-Each segment is approximated as a point load at its centroid.
+The release-specific point-load deflection [`DPoint`](@ref) is integrated
+against the load intensity, so the result is exact for every segment.
 """
 function accumulatedisp!(
     load::TributaryLoad, 
@@ -164,34 +166,47 @@ function accumulatedisp!(
     L = ep.L
 
     d1, d2, d3 = load.direction
-    pressure = load._pressure_Pa
-    widths_m = load._widths_m
+    _, uy, uz = _rotate_to_local(ep.Rv, d1, d2, d3)
+    w = intensities(load)
     positions = load.positions
-    n_seg = length(positions) - 1
 
-    for i in 1:n_seg
-        s1, s2 = positions[i], positions[i+1]
-        w1, w2 = widths_m[i], widths_m[i+1]
-
-        (s2 - s1) < 1e-12 && continue
-        (w1 + w2) < 1e-12 && continue
-
-        a = s1 * L
-        b = s2 * L
-        seg_len = b - a
-        
-        w_avg = pressure * (w1 + w2) / 2
-        F_total = w_avg * seg_len
-        frac = (a + b) / 2 / L
-
-        g1, g2, g3 = d1 * F_total, d2 * F_total, d3 * F_total
-        _, py, pz = _rotate_to_local(ep.Rv, g1, g2, g3)
-
+    for i in 1:(length(positions) - 1)
+        a = positions[i] * L
+        b = positions[i + 1] * L
+        (b - a) < 1e-12 && continue
+        wa, wb = w[i], w[i + 1]
+        (abs(wa) + abs(wb)) < 1e-12 && continue
+        wf(ξ) = wa + (wb - wa) * (ξ - a) / (b - a)
         @inbounds for j in eachindex(xvals)
-            Dy[j] -= DPoint(element, py, L, xvals[j], frac, ep.E, ep.Ix)
-            Dz[j] -= DPoint(element, pz, L, xvals[j], frac, ep.E, ep.Iy)
+            x = xvals[j]
+            # DPoint is a polynomial in the load position on each side of x.
+            fy(ξ) = wf(ξ) * DPoint(element, 1.0, L, x, ξ / L, ep.E, ep.Ix)
+            fz(ξ) = wf(ξ) * DPoint(element, 1.0, L, x, ξ / L, ep.E, ep.Iy)
+            lo, hi = a, b
+            mid = clamp(x, lo, hi)
+            Iy = _gauss3_integral(fy, lo, mid) + _gauss3_integral(fy, mid, hi)
+            Iz = _gauss3_integral(fz, lo, mid) + _gauss3_integral(fz, mid, hi)
+            Dy[j] -= uy * Iy
+            Dz[j] -= uz * Iz
         end
     end
+end
+
+"""
+    _gauss3_integral(f, lo, hi) -> Float64
+
+Three-point Gauss–Legendre integral of `f` over `[lo, hi]`; exact for a
+polynomial of degree ≤ 5.
+"""
+@inline function _gauss3_integral(f, lo, hi)
+    hi - lo < 1e-15 && return 0.0
+    h = (hi - lo) / 2
+    m = (hi + lo) / 2
+    s = 0.0
+    @inbounds for k in 1:3
+        s += _GAUSS3_W[k] * f(m + h * _GAUSS3_ξ[k])
+    end
+    return h * s
 end
 
 
@@ -463,77 +478,226 @@ function displacements(model::Model, increment)
 end
 
 
+
 # =============================================================================
-# element_max_deflections  —  nodal-only max |δ| per element from arbitrary u
+# Vertical deflection from an arbitrary displacement vector and load case
 # =============================================================================
 
 """
-    element_max_deflections(model, u; resolution=20)
+    deflection_axis_local(element) -> Union{Nothing, NTuple{2, Float64}}
 
-Return a `Dict{Int, Float64}` mapping each frame element's `elementID` to
-its maximum absolute transverse deflection (meters) along the element,
-computed from the displacement vector `u` via Hermite cubic interpolation.
+Components `(n_y, n_z)`, along the element's local y and z axes, of the unit
+vector `n` that is perpendicular to the element axis and lies in the vertical
+plane containing it:
 
-Unlike `ElementDisplacements`, this function reads directly from `u` rather
-than from `node.displacement`, so it can be used with any displacement vector
-(e.g. service-load D-only, L-only, or D+L) without mutating the model.
+    n = (ẑ − (ẑ·x̂) x̂) / |ẑ − (ẑ·x̂) x̂|
 
-Only nodal shape-function interpolation is used (no load-based corrections),
-which is accurate when spans are meshed with multiple elements.
-
-The transverse deflection is measured in the element's **local Z** direction
-(strong-axis bending plane for standard floor beams).
-
-# Arguments
-- `model` — `FrameModel` or `Model`
-- `u::Vector{Float64}` — global displacement vector (length = nDOFs)
-- `resolution::Int` — sampling points per element (default 20)
+with `ẑ` the global +Z axis and `x̂` the element axis. `n` depends only on the
+element's direction, not on its roll angle Ψ, so a horizontal beam returns the
+global vertical for the default Ψ = π/2 (local y vertical), for Ψ = 0 (local z
+vertical), and for any other roll. Returns `nothing` for a vertical element,
+which has no such plane.
 """
-function element_max_deflections(
-    model::Union{FrameModel, Model},
-    u::Vector{Float64};
-    resolution::Int = 20,
-)
-    elements = model isa FrameModel ? model.elements : model.frame_elements
-    result = Dict{Int, Float64}()
-    sizehint!(result, length(elements))
+function deflection_axis_local(element::AbstractElement)
+    lx, ly, lz = element.LCS[1], element.LCS[2], element.LCS[3]
+    c = lx[3]
+    nx = -c * lx[1]
+    ny = -c * lx[2]
+    nz = 1.0 - c * lx[3]
+    nn = sqrt(nx^2 + ny^2 + nz^2)
+    nn < 1e-6 && return nothing
+    n_y = (nx * ly[1] + ny * ly[2] + nz * ly[3]) / nn
+    n_z = (nx * lz[1] + ny * lz[2] + nz * lz[3]) / nn
+    return (n_y, n_z)
+end
 
-    _ug = Vector{Float64}(undef, 12)
-    _ul = Vector{Float64}(undef, 12)
+"""
+    element_deflection_profile(element, u, loads; resolution=20) -> Vector{Float64}
 
-    for el in elements
-        gid = el.globalID
-        @inbounds for i in 1:12
-            _ug[i] = u[gid[i]]
-        end
-        mul!(_ul, el.R, _ug)
+Transverse deflection (m) of `element` at `resolution` evenly spaced stations
+from the start node to the end node, for the global displacement vector `u` and
+the member loads `loads` that produced it.
 
-        dofs = etype2DOF[typeof(el)]
-        @inbounds for i in 1:12
-            _ul[i] *= dofs[i]
-        end
+Each station is the sum of
+1. the Hermite cubic through the element's end translations and slopes, read
+   from `u` after the `etype2DOF` mask and [`release_end_rotations!`](@ref), and
+2. the member-load particular solution of every load in `loads`
+   ([`accumulatedisp!`](@ref)), which is zero at both ends.
 
-        L = ustrip(u"m", el.length)
-        L <= 0 && continue
+Without part 2 a span modelled as one element reports no deflection from its own
+load. `loads` must be the element loads of the same case as `u`, all on
+`element`; a load on another element throws.
 
-        uZ1 = _ul[3]; uZ2 = -_ul[5]; uZ3 = _ul[9]; uZ4 = -_ul[11]
+The returned value is the component along [`deflection_axis_local`](@ref): the
+deflection in the vertical plane through the member, positive toward global +Z,
+which is the deflection that span/δ serviceability limits measure. It is the
+absolute displacement, so it includes movement of the member's end nodes. A
+vertical element has no vertical plane; it returns the transverse magnitude
+`√(Dy² + Dz²)` instead.
+"""
+function element_deflection_profile(element::AbstractElement,
+                                    u::AbstractVector{<:Real},
+                                    loads::AbstractVector{<:AbstractLoad};
+                                    resolution::Int = 20)
+    resolution >= 2 || throw(ArgumentError(
+        "element_deflection_profile: resolution must be at least 2 (got $resolution)"))
+    ep = ElementProps(element)
+    L = ep.L
+    L > 0 || throw(ArgumentError(
+        "element_deflection_profile: element $(element.elementID) has zero length"))
 
-        δ_max = 0.0
-        @inbounds for i in 0:(resolution - 1)
-            xL = i / (resolution - 1)
-            x  = xL * L
-            n1 = 1 - 3xL^2 + 2xL^3
-            n2 = x * (1 - xL)^2
-            n3 = 3xL^2 - 2xL^3
-            n4 = x^2/L * (-1 + xL)
-            dz = abs(n1*uZ1 + n2*uZ2 + n3*uZ3 + n4*uZ4)
-            δ_max = max(δ_max, dz)
-        end
+    gid = element.globalID
+    ug = Vector{Float64}(undef, 12)
+    @inbounds for i in 1:12
+        ug[i] = u[gid[i]]
+    end
+    ul = Vector{Float64}(undef, 12)
+    mul!(ul, element.R, ug)
+    dofs = etype2DOF[typeof(element)]
+    @inbounds for i in 1:12
+        ul[i] *= dofs[i]
+    end
+    release_end_rotations!(ul, element, L)
 
-        eid = el.elementID
-        prev = get(result, eid, 0.0)
-        result[eid] = max(prev, δ_max)
+    # Local xy plane: (v, θz); local xz plane: (w, −θy). See `unodal`.
+    uY1 = ul[2]; uY2 = ul[6];  uY3 = ul[8]; uY4 = ul[12]
+    uZ1 = ul[3]; uZ2 = -ul[5]; uZ3 = ul[9]; uZ4 = -ul[11]
+
+    xs = range(0.0, L, resolution)
+    Dy = Vector{Float64}(undef, resolution)
+    Dz = Vector{Float64}(undef, resolution)
+    @inbounds for i in 1:resolution
+        x = xs[i]
+        xL = x / L
+        n1 = 1 - 3xL^2 + 2xL^3
+        n2 = x * (1 - xL)^2
+        n3 = 3xL^2 - 2xL^3
+        n4 = x^2 / L * (-1 + xL)
+        Dy[i] = n1 * uY1 + n2 * uY2 + n3 * uY3 + n4 * uY4
+        Dz[i] = n1 * uZ1 + n2 * uZ2 + n3 * uZ3 + n4 * uZ4
     end
 
+    for load in loads
+        load.element === element || throw(ArgumentError(
+            "element_deflection_profile: a load on element $(load.element.elementID) " *
+            "was passed for element $(element.elementID)"))
+        accumulatedisp!(load, xs, Dy, Dz, ep)
+    end
+
+    axis = deflection_axis_local(element)
+    out = Vector{Float64}(undef, resolution)
+    if axis === nothing
+        @inbounds for i in 1:resolution
+            out[i] = hypot(Dy[i], Dz[i])
+        end
+    else
+        n_y, n_z = axis
+        @inbounds for i in 1:resolution
+            out[i] = n_y * Dy[i] + n_z * Dz[i]
+        end
+    end
+    return out
+end
+
+"""
+    _area_load_tributaries!(load::AreaLoad) -> Vector{TributaryLoad}
+
+Member loads an `AreaLoad` with `distribute_to` frame elements puts on those
+elements. Same conversion and cache as `populate_load!(model, ::AreaLoad)`; the
+cached loads follow `load.pressure` through `AreaLoad`'s `setproperty!`.
+"""
+function _area_load_tributaries!(load::AreaLoad)
+    if isnothing(load._tributary_loads)
+        axis_vec = isnothing(load.axis) ? nothing : [load.axis[1], load.axis[2]]
+        load._tributary_loads = _shell_to_tributary_loads(
+            load.shells, load.distribute_to, load.pressure;
+            axis = axis_vec, direction = load.direction,
+            interior_beams = load.interior_beams)
+    end
+    return load._tributary_loads
+end
+
+"""
+    frame_loads_by_element(model, loads) -> Vector{Vector{AbstractLoad}}
+
+Member loads in `loads`, grouped by frame element in model order
+(`model.elements` for a `FrameModel`, `model.frame_elements` for a `Model`).
+Loads are matched to elements by identity, not `elementID`. An `AreaLoad`
+distributed to frame elements contributes its tributary member loads; nodal
+loads, nodal area loads, and shell-element loads carry no member load and are
+skipped. A load on a frame element that is not in the model throws.
+"""
+function frame_loads_by_element(model::Union{FrameModel, Model},
+                                loads::AbstractVector{<:AbstractLoad})
+    elements = model isa FrameModel ? model.elements : model.frame_elements
+    index = IdDict{Any, Int}()
+    for (i, el) in enumerate(elements)
+        index[el] = i
+    end
+    out = [AbstractLoad[] for _ in elements]
+    function add!(load)
+        i = get(index, load.element, 0)
+        i == 0 && throw(ArgumentError(
+            "frame_loads_by_element: a $(nameof(typeof(load))) is on a frame element " *
+            "that is not in the model"))
+        push!(out[i], load)
+    end
+    for load in loads
+        if load isa AreaLoad
+            load.distribute_to isa Symbol && continue
+            foreach(add!, _area_load_tributaries!(load))
+        elseif hasproperty(load, :element) && load.element isa FrameElement
+            add!(load)
+        end
+    end
+    return out
+end
+
+"""
+    element_deflection_profiles(model, u, loads; resolution=20) -> Vector{Vector{Float64}}
+
+[`element_deflection_profile`](@ref) for every frame element, in model order,
+for the displacement vector `u` of one load case and that case's `loads`.
+Profiles of separate cases on the same stiffness add station by station.
+"""
+function element_deflection_profiles(model::Union{FrameModel, Model},
+                                     u::AbstractVector{<:Real},
+                                     loads::AbstractVector{<:AbstractLoad};
+                                     resolution::Int = 20)
+    length(u) == model.nDOFs || throw(DimensionMismatch(
+        "element_deflection_profiles: u has length $(length(u)), the model has " *
+        "$(model.nDOFs) DOFs"))
+    elements = model isa FrameModel ? model.elements : model.frame_elements
+    by_el = frame_loads_by_element(model, loads)
+    return [element_deflection_profile(el, u, by_el[i]; resolution = resolution)
+            for (i, el) in enumerate(elements)]
+end
+
+"""
+    element_max_deflections(model, u, loads; resolution=20) -> Dict{Int, Float64}
+
+Largest absolute [`element_deflection_profile`](@ref) value (m) of each frame
+element, keyed by `elementID` (the largest over elements that share an ID), for
+the displacement vector `u` of one load case and that case's `loads`.
+
+`u` can be any solved vector (service dead, live, or their sum) and the model is
+not mutated, apart from caching the tributary loads of an `AreaLoad`. Pass the
+loads of the same case: the member-load term is what gives a span modelled as
+one element its own deflection. For the deflection of a sum of cases, add the
+profiles from [`element_deflection_profiles`](@ref) before taking the maximum.
+"""
+function element_max_deflections(model::Union{FrameModel, Model},
+                                 u::AbstractVector{<:Real},
+                                 loads::AbstractVector{<:AbstractLoad};
+                                 resolution::Int = 20)
+    elements = model isa FrameModel ? model.elements : model.frame_elements
+    profiles = element_deflection_profiles(model, u, loads; resolution = resolution)
+    result = Dict{Int, Float64}()
+    sizehint!(result, length(elements))
+    for (i, el) in enumerate(elements)
+        δ = maximum(abs, profiles[i])
+        eid = el.elementID
+        result[eid] = max(get(result, eid, 0.0), δ)
+    end
     return result
 end

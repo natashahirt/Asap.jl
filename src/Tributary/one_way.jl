@@ -13,7 +13,10 @@ goes to the edges at its ends, split by `weights`.
 
 ## Arguments
 - `vertices::Vector{<:Point}`: Polygon vertices as Meshes.Point objects
-- `weights::Union{Nothing, AbstractVector{<:Real}}`: Optional edge weights (one per edge)
+- `weights::Union{Nothing, AbstractVector{<:Real}}`: Optional edge weights (one per edge).
+  A weight of 0 is an edge of the floor that is not a support: the stretch
+  goes wholly to its other end. Both ends unsupported throws. Positive
+  weights keep their meaning (a heavier edge takes a smaller share).
 - `axis::AbstractVector{<:Real}`: Direction vector [vx, vy] for load distribution
 - `buffers`: Accepted for compatibility and not used.
 - `holes`: Optional openings, each a vertex loop (`Point`s or `(x, y)` in meters).
@@ -36,15 +39,17 @@ function get_tributary_polygons_one_way(
     weights::Union{Nothing, AbstractVector{<:Real}} = nothing,
     axis::AbstractVector{<:Real},
     buffers::Union{Nothing, TributaryBuffers} = nothing,
-    holes = nothing
+    holes = nothing,
+    hole_supports::Union{Nothing, AbstractVector{Bool}} = nothing
 )
     m = length(vertices)
     m >= 3 || return TributaryPolygon[]
     
-    # Convert to 2D coords and ensure CCW
+    # Convert to 2D coords and ensure CCW. Weights follow the edges, so a
+    # reversal has to move each weight onto the edge it belongs to.
     pts_orig = [_to_2d(v) for v in vertices]
-    pts_orig = _ensure_ccw(pts_orig)
-    _, hole_loops = _span_region(pts_orig, holes)
+    pts_orig, weights = _ccw_loop_weights(pts_orig, weights)
+    hole_loops, hole_is_support = _supported_holes(holes, hole_supports)
     
     # Normalize axis: u = load direction, n = perpendicular (sweep direction)
     vx, vy = Float64(axis[1]), Float64(axis[2])
@@ -61,14 +66,34 @@ function get_tributary_polygons_one_way(
     pts_st = [_to_st(p, u, n) for p in pts_orig]
     holes_st = [NTuple{2,Float64}[_to_st(p, u, n) for p in h] for h in hole_loops]
 
-    # Boundary segments in (s, t). Outer edge i has id i; opening edges have id 0.
+    # Boundary segments in (s, t). Outer edge i has id i, so it stays part of
+    # the floor outline. A free opening edge has id 0. A supported hole edge
+    # (a beam ring) has a negative id and carries load, and it is still a void
+    # in the strip. A weight of 0 does not change an outer id: the edge still
+    # bounds the floor, it just carries nothing.
     segs = Tuple{NTuple{2,Float64}, NTuple{2,Float64}, Int}[]
     for i in 1:m
         push!(segs, (pts_st[i], pts_st[mod1(i + 1, m)], i))
     end
-    for h in holes_st, j in eachindex(h)
-        push!(segs, (h[j], h[mod1(j + 1, length(h))], 0))
+    ring_st = NTuple{2, NTuple{2,Float64}}[]
+    ring_xy = NTuple{2, NTuple{2,Float64}}[]
+    ring_len = Float64[]
+    for (k, hxy) in enumerate(hole_loops)
+        h = holes_st[k]
+        for j in eachindex(h)
+            a, b = h[j], h[mod1(j + 1, length(h))]
+            if hole_is_support[k]
+                push!(ring_st, (a, b))
+                c, d = hxy[j], hxy[mod1(j + 1, length(hxy))]
+                push!(ring_xy, (c, d))
+                push!(ring_len, hypot(d[1] - c[1], d[2] - c[2]))
+                push!(segs, (a, b, -length(ring_st)))
+            else
+                push!(segs, (a, b, 0))
+            end
+        end
     end
+    n_ring = length(ring_st)
     
     # Strip boundaries: every vertex, and every place an opening crosses the
     # outline or another opening, so each strip has one arrangement of stretches.
@@ -87,25 +112,35 @@ function get_tributary_polygons_one_way(
     empty_result() = [_make_tributary_with_depths(i, NTuple{2,Float64}[], pts_orig, 0.0, 0.0) for i in 1:m]
     length(t_vals) < 2 && return empty_result()
     
-    edge_areas = zeros(m)
-    edge_pieces = [NTuple{4,Float64}[] for _ in 1:m]     # (α0, w0, α1, w1) along the edge
-    edge_interior_pts = [NTuple{2,Float64}[] for _ in 1:m]
-    edge_t_range = [(Inf, -Inf) for _ in 1:m]
-    edge_is_left = [true for _ in 1:m]
+    n_slot = m + n_ring
+    edge_areas = zeros(n_slot)
+    edge_pieces = [NTuple{4,Float64}[] for _ in 1:n_slot]  # (α0, w0, α1, w1) along the edge
+    edge_interior_pts = [NTuple{2,Float64}[] for _ in 1:n_slot]
+    edge_t_range = [(Inf, -Inf) for _ in 1:n_slot]
+    edge_is_left = [true for _ in 1:n_slot]
+    # Outer ids are 1:m. A ring edge's id is negative and stores at m - id.
+    slot(e) = e > 0 ? e : m - e
+    function edge_ends(e)
+        e > 0 && return pts_st[e], pts_st[mod1(e + 1, m)]
+        return ring_st[-e]
+    end
+    holds(e) = e < 0 || (e > 0 && w[e] > 1e-12)
+    weight_of(e) = e < 0 ? 1.0 : w[e]
 
     function credit!(e, d0, d1, t0, t1, interior0, interior1, is_left)
+        e == 0 && return
         (d0 > 1e-12 || d1 > 1e-12) || return
-        edge_areas[e] += (d0 + d1) / 2 * (t1 - t0)
-        (sa, ta) = pts_st[e]
-        (sb, tb) = pts_st[mod1(e + 1, m)]
+        s = slot(e)
+        edge_areas[s] += (d0 + d1) / 2 * (t1 - t0)
+        (sa, ta), (sb, tb) = edge_ends(e)
         Δt = tb - ta
         k = abs(Δt) / hypot(sb - sa, Δt)
-        push!(edge_pieces[e], ((t0 - ta) / Δt, d0 * k, (t1 - ta) / Δt, d1 * k))
-        push!(edge_interior_pts[e], interior0)
-        push!(edge_interior_pts[e], interior1)
-        edge_is_left[e] = is_left
-        tmin, tmax = edge_t_range[e]
-        edge_t_range[e] = (min(tmin, t0), max(tmax, t1))
+        push!(edge_pieces[s], ((t0 - ta) / Δt, d0 * k, (t1 - ta) / Δt, d1 * k))
+        push!(edge_interior_pts[s], interior0)
+        push!(edge_interior_pts[s], interior1)
+        edge_is_left[s] = is_left
+        tmin, tmax = edge_t_range[s]
+        edge_t_range[s] = (min(tmin, t0), max(tmax, t1))
     end
     
     for k in 1:(length(t_vals) - 1)
@@ -116,55 +151,84 @@ function get_tributary_polygons_one_way(
             sR0, sR1 = _seg_s_at_t(segs[iR], t0), _seg_s_at_t(segs[iR], t1)
             (sR0 - sL0 > 1e-9 || sR1 - sL1 > 1e-9) || continue
             eL, eR = segs[iL][3], segs[iR][3]
-            if eL > 0 && eR > 0
-                split0 = _weighted_split(sL0, sR0, w[eL], w[eR])
-                split1 = _weighted_split(sL1, sR1, w[eL], w[eR])
-            elseif eL > 0
+            holdL, holdR = holds(eL), holds(eR)
+            if holdL && holdR
+                split0 = _weighted_split(sL0, sR0, weight_of(eL), weight_of(eR))
+                split1 = _weighted_split(sL1, sR1, weight_of(eL), weight_of(eR))
+            elseif holdL
                 split0, split1 = sR0, sR1
-            elseif eR > 0
+            elseif holdR
                 split0, split1 = sL0, sL1
             else
                 throw(ArgumentError(
                     "One-way strip between t = $(round(t0, digits=4)) and $(round(t1, digits=4)) m " *
-                    "runs from opening to opening along the span axis, so no edge supports it."))
+                    "runs between two edges that are not supports (an opening, or an edge " *
+                    "with no beam or wall), so nothing carries it."))
             end
-            eL > 0 && credit!(eL, max(0.0, split0 - sL0), max(0.0, split1 - sL1), t0, t1,
-                              (split0, t0), (split1, t1), true)
-            eR > 0 && credit!(eR, max(0.0, sR0 - split0), max(0.0, sR1 - split1), t0, t1,
-                              (split0, t0), (split1, t1), false)
+            holdL && credit!(eL, max(0.0, split0 - sL0), max(0.0, split1 - sL1), t0, t1,
+                             (split0, t0), (split1, t1), true)
+            holdR && credit!(eR, max(0.0, sR0 - split0), max(0.0, sR1 - split1), t0, t1,
+                             (split0, t0), (split1, t1), false)
         end
     end
     
     net_area = _net_area(pts_orig, hole_loops)
     results = TributaryPolygon[]
     
-    for i in 1:m
+    lengths = Float64[hypot(pts_orig[mod1(i + 1, m)][1] - pts_orig[i][1],
+                            pts_orig[mod1(i + 1, m)][2] - pts_orig[i][2]) for i in 1:m]
+    append!(lengths, ring_len)
+    for i in 1:n_slot
         if edge_areas[i] < 1e-12
-            push!(results, _make_tributary_with_depths(i, NTuple{2,Float64}[], pts_orig, 0.0, 0.0))
+            push!(results, _make_tributary_with_depths(i, NTuple{2,Float64}[], pts_orig, 0.0, 0.0;
+                                                       ends = i <= m ? nothing : ring_xy[i - m]))
             continue
         end
-        
-        # Get the actual polygon edge vertices for this edge
-        v1_st = pts_st[i]
-        v2_st = pts_st[mod1(i + 1, m)]
-        
-        # Clip the actual polygon edge to the contributing t-range
+
+        v1_st, v2_st = i <= m ? (pts_st[i], pts_st[mod1(i + 1, m)]) : ring_st[i - m]
+
+        # Clip the edge to the contributing t-range
         t_min, t_max = edge_t_range[i]
         actual_exterior = _get_edge_in_t_range(v1_st, v2_st, t_min, t_max)
-        
+
         # Reconstruct polygon from actual exterior + interior (split) points
         poly_xy = _build_tributary_polygon_v2(
             actual_exterior, edge_interior_pts[i], edge_is_left[i], u, n
         )
-        
+
         area = edge_areas[i]
         frac = net_area > 0 ? area / net_area : 0.0
         push!(results, _make_tributary_with_depths(i, poly_xy, pts_orig, area, frac;
-                                                   profile = _assemble_profile(edge_pieces[i])))
+                                                   profile = _assemble_profile(edge_pieces[i]),
+                                                   ends = i <= m ? nothing : ring_xy[i - m]))
     end
-    
-    assert_tributary_balance(results, pts_orig, net_area; context = " (one-way)")
+
+    assert_tributary_balance(results, pts_orig, net_area;
+                             context = " (one-way)", edge_lengths = n_ring == 0 ? nothing : lengths)
     return results
+end
+
+"""
+Void loops, and whether each one is a line support.
+
+A hole with fewer than three vertices is dropped, and its support flag with
+it, so the two lists stay aligned. `hole_supports === nothing` leaves every
+hole free.
+"""
+function _supported_holes(holes, hole_supports)
+    loops = Vector{NTuple{2,Float64}}[]
+    flags = Bool[]
+    holes === nothing && return loops, flags
+    n = length(holes)
+    given = hole_supports === nothing ? falses(n) : collect(Bool, hole_supports)
+    length(given) == n || error("hole_supports must have one entry per hole (got $(length(given)) for $n)")
+    for (h, flag) in zip(holes, given)
+        loop = _span_loop(h)
+        length(loop) < 3 && continue
+        push!(loops, loop)
+        push!(flags, flag)
+    end
+    return loops, flags
 end
 
 """`s` where segment `seg = (p1, p2, id)` meets the line at `t` (clamped to the segment)."""
@@ -406,6 +470,20 @@ _to_xy(s::Float64, t::Float64, u::NTuple{2,Float64}, n::NTuple{2,Float64}) =
 # =============================================================================
 # Weighted Split
 # =============================================================================
+
+"""CCW loop, and edge weights reordered onto that loop's edges."""
+function _ccw_loop_weights(pts, weights)
+    _is_ccw(pts) && return pts, weights
+    m = length(pts)
+    rev = reverse(pts)
+    weights === nothing && return rev, nothing
+    w = Vector{Float64}(undef, m)
+    for i in 1:(m - 1)
+        w[i] = weights[m - i]
+    end
+    w[m] = weights[m]
+    return rev, w
+end
 
 """Compute weighted split point between sL and sR based on edge weights."""
 function _weighted_split(sL::Float64, sR::Float64, wL::Float64, wR::Float64)

@@ -56,11 +56,14 @@ function get_tributary_polygons(
     weights::Union{Nothing, AbstractVector{<:Real}} = nothing,
     axis::Union{Nothing, AbstractVector{<:Real}} = nothing,
     buffers::Union{Nothing, TributaryBuffers} = nothing,
-    holes = nothing
+    holes = nothing,
+    hole_supports::Union{Nothing, AbstractVector{Bool}} = nothing
 )
     if isnothing(axis) || hypot(axis[1], axis[2]) < 1e-12
-        return get_tributary_polygons_isotropic(vertices; weights=weights, holes=holes)
+        return get_tributary_polygons_isotropic(vertices; weights=weights, holes=holes,
+                                                hole_supports=hole_supports)
     else
-        return get_tributary_polygons_one_way(vertices; weights=weights, axis=axis, holes=holes)
+        return get_tributary_polygons_one_way(vertices; weights=weights, axis=axis,
+                                              holes=holes, hole_supports=hole_supports)
     end
 end

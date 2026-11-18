@@ -118,7 +118,7 @@ DLine(::Element{FixedFixed}, w, L, x, E, I) = DLine_fixedfixed(w, L, x, E, I)
 """
     ThetaLine_fixedfixed(w, L, x, E, I)
 
-Simply supported rotation at `x` given:
+Fixed-fixed rotation at `x` given:
 - Distributed load `w`
 - Beam length `L`
 - Young's Modulus `E`
@@ -127,7 +127,8 @@ Simply supported rotation at `x` given:
 function ThetaLine_fixedfixed(w, L, x, E, I)
     @assert 0 ≤ x ≤ L
 
-    w/24/E/I * (L^2 * x^2 - 2L*x^3 +x^4)
+    # d/dx of DLine_fixedfixed
+    w/12/E/I * x * (L - x) * (L - 2x)
 end
 
 ThetaLine(::Element{FixedFixed}, w, L, x, E, I) = ThetaLine_fixedfixed(w, L, x, E, I)
@@ -255,7 +256,8 @@ function PPoint(P, L, x, frac)
     @assert 0 ≤ x ≤ L
     
     a = frac * L
-    R = - P / 2
+    # start reaction of a bar fixed axially at both ends with uniform EA
+    R = - P * (L - a) / L
 
     x < a ? -R : -(R + P)
 end

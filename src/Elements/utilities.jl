@@ -119,6 +119,55 @@ function lcs(xin::Vector{Float64}, Ψ::Float64; tol = 1e-6)
     return [xvec, yvec, zvec]
 end
 
+# A unit local y this close to horizontal has no up/down sense. A truly
+# vertical member lands here; a member with a real tilt does not.
+const _UP_ECCENTRICITY_HORIZONTAL_TOL = 1e-8
+
+"""
+    orient_up_eccentricity(ecc, nodeStart, nodeEnd; roll = π/2) -> NTuple{4, Float64}
+
+Sign a physical upward offset for the eccentricity tuple [`Element`](@ref) stores.
+
+`ecc` is `(e_start_f1, e_end_f1, e_f2, e_f3)`, in metres or length quantities,
+the argument order of [`eccentricity_transformation!`](@ref). That transform
+is the rigid link `u_slave = u_master + θ × e` with `e = (e_f1, e_f2, e_f3)`
+in the local frame, so slot 3 (`e_f2`) is the local-y offset and slot 4
+(`e_f3`) is local z.
+
+Pass the physical offset. A positive slot 3 means global up (global +Z).
+Do not pass a tuple already signed for this member's local y. The returned
+tuple is `ecc` in metres with slot 3 multiplied by `sign(local_y · global Z)`.
+Local axes are [`lcs`](@ref) of the chord from `nodeStart` to `nodeEnd` at
+`roll`, the same frame `process!` stores on the element. `roll` defaults to
+`π/2`, the roll the element constructor stores until a caller sets `Ψ`.
+This does not require `process!`.
+
+A vertical member, `|local_y · Z| < 1e-8`, has no up/down seat: slot 3 is
+left unchanged and the function does not throw. A zero-length chord has no
+local y either, and is likewise returned unchanged.
+"""
+function orient_up_eccentricity(ecc::NTuple{4}, nodeStart, nodeEnd; roll::Real = pi / 2)
+    stored = (
+        to_meters(ecc[1]),
+        to_meters(ecc[2]),
+        to_meters(ecc[3]),
+        to_meters(ecc[4]),
+    )
+    chord = _node_position_m(nodeEnd) .- _node_position_m(nodeStart)
+    norm(chord) > 1e-12 || return stored
+    local_y = lcs(chord, Float64(roll))[2]
+    dot_z = local_y[3]
+    abs(dot_z) < _UP_ECCENTRICITY_HORIZONTAL_TOL && return stored
+    sense = dot_z > 0 ? 1.0 : -1.0
+    return (stored[1], stored[2], stored[3] * sense, stored[4])
+end
+
+"""Node position as metres, the units [`lcs`](@ref) consumes."""
+function _node_position_m(node)
+    pos = node.position
+    return Float64[to_meters(pos[1]), to_meters(pos[2]), to_meters(pos[3])]
+end
+
 """
     endpoints(element::AbstractElement)
 

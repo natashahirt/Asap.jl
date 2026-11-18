@@ -93,14 +93,17 @@ function _split_polygon_by_line(
     # Add second intersection point to poly_a, then close with pt1
     push!(poly_a, pt2)
     
-    # Walk from edge idx2+1 back to idx1
+    # The other piece walks the same vertices, but from pt1 the boundary
+    # reaches them in reverse. Forward order bows the piece across itself
+    # (a trapezoid cut by a joist came back as a bowtie and the one-way
+    # partition then counted its area twice).
+    mid = NTuple{2, Float64}[]
     i = mod1(idx2 + 1, n)
     while i != mod1(idx1 + 1, n)
-        push!(poly_b, polygon[i])
+        push!(mid, polygon[i])
         i = mod1(i + 1, n)
     end
-    
-    # Add pt2 to poly_b to close via split line
+    append!(poly_b, reverse(mid))
     push!(poly_b, pt2)
     
     # Return both if they have enough vertices

@@ -82,7 +82,10 @@ function _create_shells_from_tri(
             id=id
         ))
     end
-    
+
+    # A collinear boundary emits a triangle with no area. Drop it here, and
+    # weld corners that are the same point, before any model is assembled.
+    collapse_degenerate_shells!(shells)
     return shells
 end
 

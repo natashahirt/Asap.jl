@@ -3,7 +3,7 @@
 using Test
 using Meshes
 using Unitful
-using Asap: get_polygon_span, SpanInfo, governing_spans, short_span, long_span, two_way_span
+using Asap: get_polygon_span, SpanInfo, governing_spans, short_span, long_span, two_way_span, longer_axis_span
 
 @testset "Polygon Span Calculations" begin
     
@@ -282,12 +282,46 @@ using Asap: get_polygon_span, SpanInfo, governing_spans, short_span, long_span, 
         si3 = SpanInfo(verts3)  # 7m x 9m → primary=7, secondary=9
         
         gov = governing_spans([si1, si2, si3])
-        
-        # Governing = max of each component
-        @test gov.primary ≈ 7.0 atol=1e-9   # max(6, 5, 7)
-        @test gov.secondary ≈ 10.0 atol=1e-9  # max(8, 10, 9)
+
+        # Spans are gathered along the first cell's axis (y: 6, 5 and 9) and
+        # its perpendicular (x: 8, 10 and 7). The 7×9 cell's short side runs
+        # the other way and still contributes 9 to y and 7 to x.
+        @test gov.primary ≈ 9.0 atol=1e-9
+        @test gov.secondary ≈ 10.0 atol=1e-9
+        @test longer_axis_span(gov) ≈ 10.0 atol=1e-9
         @test gov.isotropic ≈ sqrt(7^2 + 9^2) atol=1e-6  # max diagonal
-        @test gov.axis == si1.axis  # Uses first cell's axis
+        @test gov.axis == si1.axis
+
+        turned = SpanInfo([point2d(0, 0), point2d(6, 2), point2d(4, 8), point2d(-2, 6)])
+        @test_throws ArgumentError governing_spans([si1, turned])
+    end
+
+    @testset "SpanInfo - rotated rectangle uses its own edges" begin
+        # 12 m by 4 m, rotated 30°. The clear span is the long side. It grows
+        # when that side grows, and the short side does not.
+        θ = π / 6
+        c, s = cos(θ), sin(θ)
+        rot(x, y) = point2d(x * c - y * s, x * s + y * c)
+        si = SpanInfo([rot(0, 0), rot(12, 0), rot(12, 4), rot(0, 4)])
+        longer = SpanInfo([rot(0, 0), rot(16, 0), rot(16, 4), rot(0, 4)])
+
+        @test si.primary ≈ 4.0 atol=1e-6
+        @test si.secondary ≈ 12.0 atol=1e-6
+        @test longer_axis_span(si) ≈ 12.0 atol=1e-6
+        @test abs(si.axis[1] * (-s) + si.axis[2] * c) ≈ 1.0 atol=1e-6
+        @test longer.primary ≈ 4.0 atol=1e-6
+        @test longer_axis_span(longer) ≈ 16.0 atol=1e-6
+        @test longer_axis_span(longer) > longer_axis_span(si)
+    end
+
+    @testset "SpanInfo - a skewed bay keeps the global axes" begin
+        # Base 10 m, height 5 m, skewed 2 m. The edges are not one orthogonal
+        # frame, so the short span stays the vertical height.
+        verts = [point2d(0, 0), point2d(10, 0), point2d(12, 5), point2d(2, 5)]
+        si = SpanInfo(verts)
+        @test si.axis == (0.0, 1.0)
+        @test si.primary ≈ 5.0 atol=1e-6
+        @test longer_axis_span(si) > si.primary
     end
     
     @testset "SpanInfo - single cell governing" begin

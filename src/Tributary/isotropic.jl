@@ -1,6 +1,7 @@
 include("isotropic/face_mapping.jl")
 include("isotropic/dcel_recording.jl")
 include("isotropic/skeleton_wavefront.jl")
+include("isotropic/hole_wavefront.jl")
 include("isotropic/weighted_wavefront.jl")
 include("isotropic/cleanup.jl")
 include("isotropic/collapse_events.jl")

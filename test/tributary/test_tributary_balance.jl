@@ -42,6 +42,20 @@ _carried(t, xy) = Asap.profile_area(t, _len(xy, t.local_edge_idx))
         end
     end
 
+    @testset "a free edge carries no one-way load" begin
+        # 6 m by 4 m, spanning in x. Equal supports split the 24 m². Removing
+        # the left edge's support moves all of it onto the right edge, and
+        # removing both supports is refused.
+        tribs = get_tributary_polygons(_pts(rect); axis = [1.0, 0.0])
+        full = get_tributary_polygons(_pts(rect); axis = [1.0, 0.0], weights = [1.0, 1.0, 1.0, 0.0])
+        @test _areas(tribs)[2] ≈ 12.0 atol = 1e-6
+        @test _areas(full)[2] ≈ 24.0 atol = 1e-6
+        @test _areas(full)[4] ≈ 0.0 atol = 1e-6
+        @test sum(t.area for t in full) ≈ 24.0 atol = 1e-6
+        @test_throws ArgumentError get_tributary_polygons(
+            _pts(rect); axis = [1.0, 0.0], weights = [0.0, 0.0, 0.0, 0.0])
+    end
+
     @testset "one-way onto skewed edges keeps the whole strip" begin
         par = [(0.0, 0.0), (5.0, 0.0), (6.5, 3.0), (1.5, 3.0)]
         tribs = get_tributary_polygons(_pts(par); axis = [1.0, 0.0])
@@ -122,6 +136,51 @@ _carried(t, xy) = Asap.profile_area(t, _len(xy, t.local_edge_idx))
         corner = tribs[findfirst(t -> t.local_edge_idx == 4, tribs)]
         @test any(s -> s > 1 + 1e-9, corner.s)
         @test corner.profile_w[end - 1] > 0.0
+    end
+
+    @testset "two-way split events: a reflex vertex cuts the wavefront in two" begin
+        # The slot floor's front meets the bottom's front at t = 0.5, between
+        # x = 3 - t and 5 + t: ∫₀^½ (2 + 2t) dt = 1.25. Each wall translates
+        # 0.5 m, then takes a 0.25 m² end triangle in its 2 × 1 room.
+        slot = [(0.0, 0.0), (8.0, 0.0), (8.0, 2.0), (5.0, 2.0), (5.0, 1.0), (3.0, 1.0),
+                (3.0, 2.0), (0.0, 2.0)]
+        a = _areas(get_tributary_polygons_isotropic(_pts(slot)))
+        @test a[5] ≈ 1.25 atol = 1e-6
+        @test a[4] ≈ 0.75 atol = 1e-6
+        @test a[6] ≈ 0.75 atol = 1e-6
+        @test sum(values(a)) ≈ 14.0 atol = 1e-6
+
+        # Two apexes meet head-on (a vertex event); the result keeps both symmetries.
+        notches = [(0.0, 0.0), (5.0, 0.0), (6.0, 1.5), (7.0, 0.0), (12.0, 0.0), (12.0, 4.0),
+                   (7.0, 4.0), (6.0, 2.5), (5.0, 4.0), (0.0, 4.0)]
+        tribs = get_tributary_polygons_isotropic(_pts(notches))
+        a = _areas(tribs)
+        @test sum(values(a)) ≈ 45.0 atol = 1e-6
+        @test a[1] ≈ a[4] ≈ a[6] ≈ a[9]
+        @test a[2] ≈ a[3] ≈ a[7] ≈ a[8]
+        @test a[5] ≈ 4.0 atol = 1e-6
+        for t in tribs
+            @test _carried(t, notches) ≈ t.area atol = 1e-6
+        end
+
+        # A rib bay cut by an angled grid at an opening corner (4, 2).
+        bay = [(4.0, 2.0), (4.0, 2.403), (3.6662, 2.2103), (4.1162, 1.4309),
+               (4.8956, 1.8809), (4.8268, 2.0)]
+        tribs = get_tributary_polygons_isotropic(_pts(bay))
+        @test sum(t.area for t in tribs) ≈ Asap._net_area(bay, Vector{NTuple{2,Float64}}[]) atol = 1e-9
+    end
+
+    @testset "two-way: a region past a short edge folds until it lies on the edge" begin
+        # Edge 1 is 0.15 m long and starts at the re-entrant corner (2, 2);
+        # its region runs past that corner by more than its own length.
+        bay = [(2.0, 2.0), (2.0, 2.1485), (1.8457, 2.5724), (1.0, 2.2646), (1.3078, 1.4189),
+               (2.1535, 1.7267), (2.0541, 2.0)]
+        tribs = get_tributary_polygons_isotropic(_pts(bay))
+        short = tribs[findfirst(t -> t.local_edge_idx == 1, tribs)]
+        @test any(s -> s < -1.0, short.s)
+        for t in tribs
+            @test _carried(t, bay) ≈ t.area atol = 1e-9
+        end
     end
 
     @testset "profile sum keeps steps" begin

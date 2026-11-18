@@ -23,6 +23,35 @@ function make_ids!(springs::Vector{Spring})
 end
 
 """
+Add `springs` into `model.S` and invalidate the cached factorization.
+
+A spring sits on its node's own DOFs, which elements already store, so the
+sparsity pattern usually holds. The factor is then only marked stale and the
+next solve refactors it numerically, reusing the symbolic analysis. A spring
+that adds a stored entry changes the pattern, and the factor is dropped.
+"""
+function _assemble_springs!(model::AbstractModel, springs::Vector{Spring})
+    make_ids!(springs)
+    for spring in springs
+        populate_globalID!(spring)
+    end
+    n_before = nnz(model.S)
+    assemble_stiffness!(model.S, springs)
+    if nnz(model.S) == n_before
+        _invalidate_factor_values!(model)
+    else
+        model._scatter = nothing
+        clear_factorization!(model)
+    end
+    return model
+end
+
+function _assemble_model_springs!(model::Union{FrameModel,Model})
+    isempty(model.springs) && return model
+    return _assemble_springs!(model, model.springs)
+end
+
+"""
     add_springs!(model::AbstractModel, springs::Vector{Spring})
 
 Add grounded springs to a model after processing.
@@ -42,18 +71,6 @@ add_springs!(model, springs)
 solve!(model)
 ```
 """
-function _assemble_model_springs!(model::Union{FrameModel,Model})
-    isempty(model.springs) && return model
-    make_ids!(model.springs)
-    for spring in model.springs
-        populate_globalID!(spring)
-    end
-    assemble_stiffness!(model.S, model.springs)
-    model._scatter = nothing
-    clear_factorization!(model)
-    return model
-end
-
 function add_springs!(
     model::Union{FrameModel,Model},
     springs::Vector{Spring},
@@ -69,29 +86,14 @@ function add_springs!(
         end
     end
     model.processed || return model
-
-    make_ids!(springs)
-    for spring in springs
-        populate_globalID!(spring)
-    end
-    assemble_stiffness!(model.S, springs)
-    model._scatter = nothing
-    clear_factorization!(model)
-    return model
+    return _assemble_springs!(model, springs)
 end
 
 function add_springs!(
     model::Union{ShellModel,TrussModel},
     springs::Vector{Spring},
 )
-    make_ids!(springs)
-    for spring in springs
-        populate_globalID!(spring)
-    end
-    assemble_stiffness!(model.S, springs)
-    model._scatter = nothing
-    clear_factorization!(model)
-    return model
+    return _assemble_springs!(model, springs)
 end
 
 """

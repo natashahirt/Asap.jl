@@ -142,6 +142,7 @@ export FixedFree
 export FreeFixed
 export FreeFree
 export has_eccentricity
+export orient_up_eccentricity
 export ShellElement
 export ShellTri3
 export CompositeShellTri3
@@ -153,6 +154,7 @@ export rotational_stiffness
 export ShellSection
 export ShellPatch
 export Shell
+export collapse_degenerate_shells!
 export VaultShell
 export get_vault_mesh_data
 export mesh
@@ -216,7 +218,7 @@ export compute_voronoi_tributaries
 # Span calculations
 export get_polygon_span
 export governing_spans
-export short_span, long_span, two_way_span
+export short_span, long_span, two_way_span, longer_axis_span
 # Polygon utilities
 export is_convex_polygon
 
@@ -251,10 +253,13 @@ include("Model/analysis.jl")
 # RigidLink defines methods on AbstractModel and calls process!/post_process!,
 # so it must be included after the Model + analysis includes above.
 include("Elements/rigidlink.jl")         # Rigid kinematic-offset links (master/slave reduction)
+include("Model/release_copy.jl")
+export with_releases
 export RigidLink
 export rigid_link_transformation
 export process!
 export update!
+export stale_frame_elements
 export solve!
 export solve
 export factorize!, clear_factorization!

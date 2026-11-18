@@ -12,12 +12,15 @@ function q_local(load::PointLoad)
     value_stripped = [to_newtons(v) for v in load.value]
     plocal = load.element.R[1:3, 1:3] * value_stripped .* LCS
 
-    #axial end forces
-    ax1 = ax2 = - dot(plocal[1], LCS[1]) / 2
-
     #position of load from start node
     a = load.position * l
     b = l - a #remainder
+
+    # axial end forces: a bar fixed axially at both ends with uniform EA
+    # carries P b / L to the start and P a / L to the end
+    px = - dot(plocal[1], LCS[1])
+    ax1 = px * b / l
+    ax2 = px * a / l
 
     # perpendicular load in local Y
     py = - dot(plocal[2], LCS[2])
@@ -276,22 +279,21 @@ function _fem_linear_segment!(fem::Vector{Float64},
     R_B = R_B_u + R_B_t
     M_A = M_A_u + M_A_t
     M_B = M_B_u + M_B_t
+    N_A, N_B = _fem_axial_partial(L, a, b, w_a, Δw, 0.0)
 
-    # Axial (local X)
-    half_total = px * (R_A + R_B) / 2
     @inbounds begin
-        fem[1]  += half_total     # ax1
-        fem[7]  += half_total     # ax2
-        # Transverse Y
+        fem[1]  += px * N_A       # ax1
+        fem[7]  += px * N_B       # ax2
+        # Transverse Y and Z. Signs match `q_local(::LineLoad)`: M_A < 0 for a
+        # load along +py, and LineLoad has mz1 = +py wL²/12, my1 = -pz wL²/12.
         fem[2]  += py * R_A       # vy1
         fem[8]  += py * R_B       # vy2
-        fem[6]  += py * M_A       # mz1
-        fem[12] += py * M_B       # mz2
-        # Transverse Z
+        fem[6]  += -py * M_A      # mz1
+        fem[12] += -py * M_B      # mz2
         fem[3]  += pz * R_A       # vz1
         fem[9]  += pz * R_B       # vz2
-        fem[5]  += -pz * M_A      # my1
-        fem[11] += -pz * M_B      # my2
+        fem[5]  += pz * M_A       # my1
+        fem[11] += pz * M_B       # my2
     end
     return fem
 end
@@ -394,6 +396,36 @@ const _GAUSS3_ξ = (-sqrt(0.6), 0.0, sqrt(0.6))
 const _GAUSS3_W = (5 / 9, 8 / 9, 5 / 9)
 
 """
+    _fem_axial_partial(L, a, b, w0, w1, w2) -> (N_A, N_B)
+
+Axial end reactions of a bar of uniform `EA`, fixed axially at both ends, under
+
+    w(x) = w0 + w1 τ + w2 τ²,    τ = (x - a) / (b - a)
+
+on `[a, b]`: `N_A = ∫ w (L - x) / L dx` and `N_B = ∫ w x / L dx`. These are the
+simple-span reactions, not the bending end shears `R_A`, `R_B`. The integrand
+has degree at most 3, so three-point Gauss–Legendre is exact.
+"""
+function _fem_axial_partial(L::Float64, a::Float64, b::Float64,
+                            w0::Float64, w1::Float64, w2::Float64)
+    ℓ = b - a
+    (ℓ < 1e-12 || L < 1e-12) && return (0.0, 0.0)
+    half = 0.5 * ℓ
+    mid = 0.5 * (a + b)
+    F = 0.0
+    Fx = 0.0
+    @inbounds for k in 1:3
+        x = mid + half * _GAUSS3_ξ[k]
+        τ = (x - a) / ℓ
+        dw = _GAUSS3_W[k] * half * (w0 + w1 * τ + w2 * τ * τ)
+        F += dw
+        Fx += dw * x
+    end
+    N_B = Fx / L
+    return (F - N_B, N_B)
+end
+
+"""
     fem_quadratic_segment(L, a, b, w0, w1, w2) -> (R_A, R_B, M_A, M_B)
 
 Fixed-end forces for a load on `[a, b]` of a member of length `L` (metres,
@@ -450,18 +482,18 @@ function _fem_quadratic_segment!(fem::Vector{Float64},
     R_B = R.R_B
     M_A = R.M_A
     M_B = R.M_B
-    half_total = px * (R_A + R_B) / 2
+    N_A, N_B = _fem_axial_partial(L, a, b, w0, w1, w2)
     @inbounds begin
-        fem[1]  += half_total
-        fem[7]  += half_total
+        fem[1]  += px * N_A
+        fem[7]  += px * N_B
         fem[2]  += py * R_A
         fem[8]  += py * R_B
-        fem[6]  += py * M_A
-        fem[12] += py * M_B
+        fem[6]  += -py * M_A
+        fem[12] += -py * M_B
         fem[3]  += pz * R_A
         fem[9]  += pz * R_B
-        fem[5]  += -pz * M_A
-        fem[11] += -pz * M_B
+        fem[5]  += pz * M_A
+        fem[11] += pz * M_B
     end
     return fem
 end
