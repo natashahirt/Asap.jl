@@ -31,8 +31,23 @@ With equal weights the wavefront has edge and split events
 ([`_propagate_isotropic!`](@ref)), so a concave face gets its true straight
 skeleton. Unequal weights use edge events only, so a weighted concave face
 can differ from the weighted skeleton.
+
+Result `i` is the caller's edge `vertices[i] → vertices[i+1]`, in that
+direction, whichever way the loop winds.
 """
 function get_tributary_polygons_isotropic(
+    vertices::Vector{<:Point};
+    weights::Union{Nothing, AbstractVector{<:Real}} = nothing,
+    holes = nothing,
+    hole_supports::Union{Nothing, AbstractVector{Bool}} = nothing
+)
+    return _in_caller_orientation(vertices, weights) do v, w
+        _isotropic_ccw(v; weights = w, holes = holes, hole_supports = hole_supports)
+    end
+end
+
+"""[`get_tributary_polygons_isotropic`](@ref) on a counterclockwise loop."""
+function _isotropic_ccw(
     vertices::Vector{<:Point};
     weights::Union{Nothing, AbstractVector{<:Real}} = nothing,
     holes = nothing,

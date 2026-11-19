@@ -193,4 +193,35 @@ _carried(t, xy) = Asap.profile_area(t, _len(xy, t.local_edge_idx))
         t = TributaryPolygon(1, [0.0, 1.0, 0.75, 0.25], [0.0, 0.0, 1.0, 1.0], 3.0, 0.5)
         @test Asap.profile_area(t, 4.0) ≈ 3.0 atol = 1e-12
     end
+
+    @testset "a clockwise loop is answered edge for edge" begin
+        # A joist strip with one slanted side, wound clockwise as a polygon
+        # cut comes back. The slanted edge is 3 → 4.
+        cw = [(0.0, 0.0), (0.0, 0.705), (6.0, 0.705), (4.943, 0.0)]
+        ccw = reverse(cw)
+        # Edge i of `cw` is edge `ccw_of(i)` of `ccw`, walked the other way.
+        ccw_of(i) = i < 4 ? 4 - i : 4
+        for axis in ([0.0, 1.0], nothing)
+            tc = axis === nothing ? get_tributary_polygons_isotropic(_pts(cw)) :
+                get_tributary_polygons(_pts(cw); axis = axis)
+            tr = axis === nothing ? get_tributary_polygons_isotropic(_pts(ccw)) :
+                get_tributary_polygons(_pts(ccw); axis = axis)
+            for i in 1:4
+                a = tc[findfirst(t -> t.local_edge_idx == i, tc)]
+                b = tr[findfirst(t -> t.local_edge_idx == ccw_of(i), tr)]
+                @test a.area ≈ b.area atol = 1e-9
+                @test _carried(a, cw) ≈ a.area atol = 1e-9
+                # The same width at the same point of the edge.
+                for x in (0.1, 0.5, 0.9)
+                    wa = Asap._interpolate_depth(x, a.profile_s, a.profile_w)
+                    wb = Asap._interpolate_depth(1 - x, b.profile_s, b.profile_w)
+                    @test wa ≈ wb atol = 1e-9
+                end
+            end
+        end
+        # The vertical side is parallel to the load and carries nothing.
+        tc = get_tributary_polygons(_pts(cw); axis = [0.0, 1.0])
+        @test tc[findfirst(t -> t.local_edge_idx == 1, tc)].area ≈ 0.0 atol = 1e-9
+        @test tc[findfirst(t -> t.local_edge_idx == 3, tc)].area > 0.1
+    end
 end

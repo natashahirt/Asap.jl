@@ -33,12 +33,28 @@ reaching an edge whose direction makes angle θ with `axis` loads it with
 `D·|sin θ|` per unit edge length. That keeps the whole stretch on the edge it
 reaches, including skewed edges. Areas are net of openings and sum to the net
 floor area; this throws otherwise.
+
+Result `i` is the caller's edge `vertices[i] → vertices[i+1]`, in that
+direction, whichever way the loop winds.
 """
 function get_tributary_polygons_one_way(
     vertices::Vector{<:Point};
     weights::Union{Nothing, AbstractVector{<:Real}} = nothing,
     axis::AbstractVector{<:Real},
     buffers::Union{Nothing, TributaryBuffers} = nothing,
+    holes = nothing,
+    hole_supports::Union{Nothing, AbstractVector{Bool}} = nothing
+)
+    return _in_caller_orientation(vertices, weights) do v, w
+        _one_way_ccw(v; weights = w, axis = axis, holes = holes, hole_supports = hole_supports)
+    end
+end
+
+"""[`get_tributary_polygons_one_way`](@ref) on a counterclockwise loop."""
+function _one_way_ccw(
+    vertices::Vector{<:Point};
+    weights::Union{Nothing, AbstractVector{<:Real}} = nothing,
+    axis::AbstractVector{<:Real},
     holes = nothing,
     hole_supports::Union{Nothing, AbstractVector{Bool}} = nothing
 )

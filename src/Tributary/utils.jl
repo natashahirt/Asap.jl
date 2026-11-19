@@ -807,6 +807,44 @@ _is_ccw(pts::Vector{NTuple{2,Float64}}) = _polygon_area(pts) > 0
 """Ensure polygon is CCW oriented."""
 _ensure_ccw(pts::Vector{NTuple{2,Float64}}) = _is_ccw(pts) ? pts : reverse(pts)
 
+"""
+`tp` measured from the other end of its edge, and numbered `idx`.
+
+Positions `s` run from the far end, and `d` changes sign because the edge's
+left side is now the other side. The points are the same.
+"""
+function _reverse_edge(tp::TributaryPolygon, idx::Int)
+    flip(s) = reverse(1.0 .- s)
+    TributaryPolygon(idx, 1.0 .- tp.s, .-tp.d, tp.area, tp.fraction,
+                     flip(tp.cell_depths_s), reverse(tp.cell_depths), tp.l2_stiff,
+                     tp.cell_depth_max, 1.0 - tp.cell_depth_s_max,
+                     flip(tp.profile_s), reverse(tp.profile_w))
+end
+
+"""
+`compute(vertices, weights)` on a counterclockwise loop, with the results
+numbered and oriented as the caller's edges.
+
+The partitions walk a counterclockwise outline. On a clockwise one they
+reverse it, so their edge `i` would be the caller's edge `m - i` traversed
+backward. Results past the outline's `m` edges (beam-ring edges) are not
+outline edges and keep their place.
+"""
+function _in_caller_orientation(compute, vertices::AbstractVector, weights)
+    m = length(vertices)
+    pts = [_to_2d(v) for v in vertices]
+    (m < 3 || _is_ccw(pts)) && return compute(vertices, weights)
+    caller_edge(i) = i < m ? m - i : m
+    rev_weights = weights === nothing ? nothing :
+        [weights[caller_edge(i)] for i in 1:m]
+    out = compute(reverse(vertices), rev_weights)
+    res = map(out) do r
+        i = r.local_edge_idx
+        1 <= i <= m ? _reverse_edge(r, caller_edge(i)) : r
+    end
+    return sort!(res; by = r -> r.local_edge_idx)
+end
+
 """Simplify polygon by dropping collinear vertices."""
 function simplify_collinear_polygon(pts::Vector{NTuple{2,Float64}}; tol=1e-12)
     n = length(pts)
