@@ -1,3 +1,4 @@
+include("analysis/analysis_log.jl")
 include("analysis/capabilities.jl")
 include("analysis/processing_pipeline.jl")
 include("analysis/linear_static.jl")

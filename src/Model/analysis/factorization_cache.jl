@@ -14,6 +14,7 @@ indefinite, falls back to LU (UMFPACK).
 function factorize!(model::AbstractModel)
     model.processed || error("Model must be processed before factorizing. Call process!(model) first.")
     idx = model.freeDOFs
+    log_analysis!(model, :factor; n_free = length(idx))
     K = Symmetric(model.S[idx, idx])
     fact = cholesky(K; check=false)
     if !issuccess(fact)
@@ -73,9 +74,13 @@ function _get_factorization(model::AbstractModel)
         cholesky!(old, K; check=false)
         if issuccess(old)
             model._factorization_stale = false
+            # In-place numeric refactorization: reused symbolic analysis.
+            log_analysis!(model, :refactor; n_free = length(idx))
             return old
         end
     end
+    # Full factorization: new symbolic analysis (fill-reducing ordering).
+    log_analysis!(model, :factor; n_free = length(idx))
     model._factorization = nothing
     model._factorization_stale = false
     model._factor_key = UInt(0)

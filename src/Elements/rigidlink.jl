@@ -214,6 +214,9 @@ function solve!(model::AbstractModel, links::AbstractVector{RigidLink};
     retained_free = setdiff(model.freeDOFs, dependent)
 
     Krr = Symmetric(Sc[retained_free, retained_free])
+    # Rigid-diaphragm solve: a fresh reduced factorization (the model factor is
+    # nulled below), invisible to _N_FACTORIZATIONS. One right-hand side.
+    log_analysis!(model, :factor; n_free = length(retained_free), n_rhs = 1)
     fact = cholesky(Krr; check = false)
     if !issuccess(fact)
         @warn "RigidLink reduced stiffness not SPD — trying LDLᵀ"
@@ -334,6 +337,9 @@ function solve(model::Model,
     Sc = Gt * S * G
     retained_free = setdiff(model.freeDOFs, dependent, held)
     Krr = Symmetric(Sc[retained_free, retained_free])
+    # Rigid-diaphragm multi-case solve: one fresh reduced factorization reused
+    # across every load case. Invisible to _N_FACTORIZATIONS.
+    log_analysis!(model, :factor; n_free = length(retained_free), n_rhs = ncases)
     fact = cholesky(Krr; check = false)
     if !issuccess(fact)
         @warn "RigidLink reduced stiffness not SPD — trying LDLᵀ"
