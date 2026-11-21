@@ -185,3 +185,88 @@ function _get_reduced_factorization!(model::AbstractModel, Krr::Symmetric,
     return fact
 end
 
+# =============================================================================
+# #7 phase 2b — Caller-owned reduced-factorization cache (lateral solves)
+# =============================================================================
+
+"""
+    RigidLinkFactorCache()
+
+Caller-owned cache for the reduced rigid-link factorization used by the
+non-mutating [`solve`](@ref)`(model, cases, links; factor_cache=…)`.
+
+The mutating `solve!`/plain-`solve` reuse path caches a *single* factor in
+`model._factorization`, which cannot serve the `geometric_stiffness` (P-Δ) or
+`exclude_shells` (frame-only drift) variants: each builds a *different* reduced
+matrix `Krr`, and the lateral stage interleaves them across many load cases and
+gravity combinations. This cache holds one CHOLMOD symbolic factorization per
+distinct reduced pattern (keyed by [`_reduced_factor_pattern_key`](@ref) plus
+the solve variant), so a sweep that changes only *values* — the story geometric
+stiffness `K_G` across gravity keys, or a section update between sizing
+iterations — reuses the fill-reducing ordering via `cholesky!` instead of a
+fresh symbolic analysis every call.
+
+Pass it as the `factor_cache` keyword; omit it (or pass `nothing`) for the
+previous fresh-every-call behaviour. The key folds in `objectid(model.S)` and
+`nnz(model.S)`, so a remesh (new `S`) never matches a stale entry; still, the
+owner should discard or clear the cache when the mesh/topology changes to avoid
+holding dead factors. Only SPD Cholesky factors are cached — an indefinite
+`Krr` (e.g. a buckling P-Δ system) falls back to LDLᵀ/LU every call, exactly as
+the uncached path does.
+"""
+mutable struct RigidLinkFactorCache
+    factors::Dict{UInt, SparseArrays.CHOLMOD.Factor}
+end
+RigidLinkFactorCache() = RigidLinkFactorCache(Dict{UInt, SparseArrays.CHOLMOD.Factor}())
+
+"""Drop every cached factor (call when the mesh/topology changes)."""
+clear!(cache::RigidLinkFactorCache) = (empty!(cache.factors); cache)
+
+"""
+    _cached_reduced_factor!(cache, model, Krr::Symmetric, retained_free, key) -> factor
+
+Factor the reduced stiffness `Krr` using `cache`, reusing the cached CHOLMOD
+symbolic analysis via `cholesky!` when an entry for `key` already exists. Like
+[`_get_reduced_factorization!`](@ref) this always recomputes the numerics from
+the *current* `Krr`, so a reuse is bit-identical to factoring from scratch; only
+the (pattern-only) fill-reducing ordering is reused. `key` must encode both the
+reduced sparsity pattern and the solve variant so two matrices with coincident
+patterns but different semantics (e.g. `S` vs `S + K_G`) never share a factor.
+Only SPD factors are cached; an indefinite `Krr` falls back to LDLᵀ → LU and is
+not stored, so the cache never holds a factor it cannot refresh in place.
+"""
+function _cached_reduced_factor!(cache::RigidLinkFactorCache, model::AbstractModel,
+                                 Krr::Symmetric, retained_free::AbstractVector{Int},
+                                 key::UInt)
+    old = get(cache.factors, key, nothing)
+    # Same reduced pattern + variant: in-place numeric refactorization from the
+    # CURRENT `Krr`, reusing the cached fill-reducing ordering.
+    if old !== nothing && key != 0
+        cholesky!(old, Krr; check = false)
+        if issuccess(old)
+            log_analysis!(model, :refactor; n_free = length(retained_free))
+            return old
+        end
+    end
+    # Fresh symbolic analysis. Same SPD → LDLᵀ → LU ladder as the uncached path.
+    # Like the rest of the non-mutating `solve`, this is invisible to
+    # `_N_FACTORIZATIONS`; the `:factor`/`:refactor` log events are the reuse
+    # signal.
+    log_analysis!(model, :factor; n_free = length(retained_free))
+    fact = cholesky(Krr; check = false)
+    if issuccess(fact)
+        key != 0 && (cache.factors[key] = fact)
+        return fact
+    end
+    # Indefinite reduced stiffness (e.g. a buckling P-Δ system): do not cache a
+    # factor we cannot `cholesky!`-refresh. Drop any stale SPD entry for `key`.
+    delete!(cache.factors, key)
+    @warn "RigidLink reduced stiffness not SPD — trying LDLᵀ"
+    fact = ldlt(Krr; check = false)
+    if !issuccess(fact)
+        @warn "LDLᵀ failed — falling back to LU"
+        fact = lu(Krr.data)
+    end
+    return fact
+end
+

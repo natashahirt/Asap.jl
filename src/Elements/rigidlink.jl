@@ -283,12 +283,20 @@ forces recovered as `K_e u_e` carry the second-order actions.
 `exclude_shells` subtracts the shell stiffness and holds every degree of
 freedom that only a shell touches. Diaphragm slaves stay tied. The numbering
 does not change.
+
+`factor_cache`, a [`RigidLinkFactorCache`](@ref), reuses the reduced CHOLMOD
+symbolic factorization across calls for the `geometric_stiffness`/`exclude_shells`
+variants (which cannot reuse `model._factorization`). A lateral sweep that only
+changes values — the story `K_G` across gravity keys, a section update between
+iterations — then pays one symbolic analysis per pattern instead of one per
+call. Omit it for the previous fresh-every-call behaviour.
 """
 function solve(model::Model,
                cases::Vector{<:Vector{<:AbstractLoad}},
                links::AbstractVector{RigidLink};
                geometric_stiffness::Union{Nothing, AbstractMatrix} = nothing,
-               exclude_shells::Bool = false)
+               exclude_shells::Bool = false,
+               factor_cache = nothing)
     model.processed || process!(model)
     ncases = length(cases)
     ncases == 0 && return Vector{Float64}[]
@@ -343,7 +351,9 @@ function solve(model::Model,
     # factor — when the reduced pattern key matches and it is not stale; the
     # building model is solved sequentially, so there is no aliasing. Otherwise
     # factor fresh, exactly as before. Any geometric_stiffness/exclude_shells
-    # variant builds a different matrix and always factors fresh.
+    # variant builds a different matrix; it cannot reuse `model._factorization`,
+    # but a caller-supplied `factor_cache` (#7 phase 2b) reuses the symbolic
+    # analysis across the lateral sweep — see `RigidLinkFactorCache`.
     fact = nothing
     if geometric_stiffness === nothing && !exclude_shells
         cached = model._factorization
@@ -352,6 +362,13 @@ function solve(model::Model,
            model._factor_key == _reduced_factor_pattern_key(model, Krr, retained_free)
             fact = cached
         end
+    end
+    if fact === nothing && factor_cache isa RigidLinkFactorCache
+        # The variant discriminator keeps `S`, `S + K_G`, and `S` with shells
+        # excluded on separate keys even when their reduced patterns coincide.
+        variant_key = hash((_reduced_factor_pattern_key(model, Krr, retained_free),
+                            exclude_shells, geometric_stiffness !== nothing))
+        fact = _cached_reduced_factor!(factor_cache, model, Krr, retained_free, variant_key)
     end
     if fact === nothing
         # Rigid-diaphragm multi-case solve: one fresh reduced factorization reused

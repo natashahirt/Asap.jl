@@ -256,6 +256,7 @@ include("Elements/rigidlink.jl")         # Rigid kinematic-offset links (master/
 include("Model/release_copy.jl")
 export with_releases
 export RigidLink
+export RigidLinkFactorCache
 export rigid_link_transformation
 export process!
 export update!
