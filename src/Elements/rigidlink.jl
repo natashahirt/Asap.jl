@@ -334,16 +334,37 @@ function solve(model::Model,
     Sc = Gt * S * G
     retained_free = setdiff(model.freeDOFs, dependent, held)
     Krr = Symmetric(Sc[retained_free, retained_free])
-    # Rigid-diaphragm multi-case solve: one fresh reduced factorization reused
-    # across every load case. Invisible to _N_FACTORIZATIONS.
-    log_analysis!(model, :factor; n_free = length(retained_free), n_rhs = ncases)
-    fact = cholesky(Krr; check = false)
-    if !issuccess(fact)
-        @warn "RigidLink reduced stiffness not SPD — trying LDLᵀ"
-        fact = ldlt(Krr; check = false)
+    # #7 phase 2 (read-only cache reuse): for the *plain* reduced system (no
+    # geometric stiffness, shells kept) the model may already hold a CURRENT
+    # factorization of this exact `Krr` — the one the preceding mutating
+    # `solve!(model, links)` built (e.g. `_solve_with_patterns!` does a mutating
+    # full-load solve, then this multi-case solve). Reuse it read-only — this
+    # call must not write model state, and a CHOLMOD `\` does not mutate the
+    # factor — when the reduced pattern key matches and it is not stale; the
+    # building model is solved sequentially, so there is no aliasing. Otherwise
+    # factor fresh, exactly as before. Any geometric_stiffness/exclude_shells
+    # variant builds a different matrix and always factors fresh.
+    fact = nothing
+    if geometric_stiffness === nothing && !exclude_shells
+        cached = model._factorization
+        if cached isa SparseArrays.CHOLMOD.Factor && !model._factorization_stale &&
+           model._factor_key != 0 &&
+           model._factor_key == _reduced_factor_pattern_key(model, Krr, retained_free)
+            fact = cached
+        end
+    end
+    if fact === nothing
+        # Rigid-diaphragm multi-case solve: one fresh reduced factorization reused
+        # across every load case. Invisible to _N_FACTORIZATIONS.
+        log_analysis!(model, :factor; n_free = length(retained_free), n_rhs = ncases)
+        fact = cholesky(Krr; check = false)
         if !issuccess(fact)
-            @warn "LDLᵀ failed — falling back to LU"
-            fact = lu(Sc[retained_free, retained_free])
+            @warn "RigidLink reduced stiffness not SPD — trying LDLᵀ"
+            fact = ldlt(Krr; check = false)
+            if !issuccess(fact)
+                @warn "LDLᵀ failed — falling back to LU"
+                fact = lu(Sc[retained_free, retained_free])
+            end
         end
     end
 
