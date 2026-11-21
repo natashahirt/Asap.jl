@@ -214,18 +214,13 @@ function solve!(model::AbstractModel, links::AbstractVector{RigidLink};
     retained_free = setdiff(model.freeDOFs, dependent)
 
     Krr = Symmetric(Sc[retained_free, retained_free])
-    # Rigid-diaphragm solve: a fresh reduced factorization (the model factor is
-    # nulled below), invisible to _N_FACTORIZATIONS. One right-hand side.
-    log_analysis!(model, :factor; n_free = length(retained_free), n_rhs = 1)
-    fact = cholesky(Krr; check = false)
-    if !issuccess(fact)
-        @warn "RigidLink reduced stiffness not SPD — trying LDLᵀ"
-        fact = ldlt(Krr; check = false)
-        if !issuccess(fact)
-            @warn "LDLᵀ failed — falling back to LU"
-            fact = lu(Sc[retained_free, retained_free])
-        end
-    end
+    # #7: factor the reduced system through the model's factor cache. On a
+    # value-only re-solve (same mesh/links/geometry; only section stiffness
+    # changed) `Krr`'s sparsity pattern is unchanged, so `cholesky!` reuses the
+    # symbolic analysis instead of a fresh factorization. The cache is exact
+    # (pattern-keyed, SPD-guarded) and falls back to a fresh factorization
+    # otherwise — see `_get_reduced_factorization!`.
+    fact = _get_reduced_factorization!(model, Krr, retained_free)
 
     Ur = fact \ Fc[retained_free]
 
@@ -236,7 +231,9 @@ function solve!(model::AbstractModel, links::AbstractVector{RigidLink};
     model.u = G * u
 
     model.compliance = dot(Ur, Fc[retained_free])
-    model._factorization = nothing
+    # Keep the reduced factor cached in `model._factorization` for reuse by the
+    # next value-only re-solve; the lifecycle (`update!`/`process!`) invalidates
+    # it when `S` changes.
 
     post_process!(model; targets = postprocess)
     return model
