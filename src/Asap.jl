@@ -264,6 +264,7 @@ export stale_frame_elements
 export solve!
 export solve
 export factorize!, clear_factorization!
+export drift_participation, DriftParticipation
 export ANALYSIS_TYPES
 export available_analyses
 export supports_analysis

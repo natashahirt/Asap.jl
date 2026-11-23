@@ -72,6 +72,7 @@ Unitful.register(Asap)
         include("integration_and_api/test_reaction_contract.jl")
         include("integration_and_api/test_parametric_processing.jl")
         include("integration_and_api/test_factorization_cache.jl")
+        include("integration_and_api/test_drift_participation.jl")
     end
     
     # =========================================================================
