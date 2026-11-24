@@ -265,6 +265,7 @@ export solve!
 export solve
 export factorize!, clear_factorization!
 export drift_participation, DriftParticipation, BatchedDriftParticipation
+export linear_response
 export ANALYSIS_TYPES
 export available_analyses
 export supports_analysis

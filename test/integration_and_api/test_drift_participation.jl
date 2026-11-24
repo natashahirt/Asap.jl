@@ -1,7 +1,7 @@
 using Asap
 using Test
 using Unitful
-using LinearAlgebra: dot
+using LinearAlgebra: dot, norm
 
 # Virtual-work drift participation: δ at a free DOF decomposes into per-element
 # coefficients c_e = u_vᵀ K_e u_r, with Σ c_e == δ (Maxwell–Betti). These tests
@@ -204,5 +204,41 @@ using LinearAlgebra: dot
         @test length(dp.c) == 2
         @test dp.c[1] ≈ dp.c[2] rtol = 1e-6         # symmetric columns participate equally
         @test all(c -> c > 0, dp.c)
+
+        # linear_response on the reduced system reproduces the real displacement.
+        @test linear_response(model, model.P .- model.Pf; links = links) ≈ model.u rtol = 1e-7
+    end
+
+    @testset "linear_response reproduces the real displacement" begin
+        model, _, _ = _two_story_column()
+        @test linear_response(model, model.P .- model.Pf) ≈ model.u rtol = 1e-9
+        @test_throws ErrorException linear_response(model, zeros(model.nDOFs + 1))
+    end
+
+    @testset "linear_response predicts a resize to first order" begin
+        # Two identical 2-story columns differing only in element 1's inertia.
+        mk(I1) = begin
+            h = 3.0; E = 200.0e9; I = 8.0e-5; A = 1.0e-2
+            s(Ix) = Section(A * u"m^2", E * u"Pa", 80.0e9u"Pa",
+                            Ix * u"m^4", Ix * u"m^4", 1.0e-6u"m^4")
+            base = Node([0.0u"m", 0.0u"m", 0.0u"m"], :fixed)
+            mid  = Node([0.0u"m", 0.0u"m", h * 1.0u"m"], :free)
+            top  = Node([0.0u"m", 0.0u"m", 2h * 1.0u"m"], :free)
+            e1 = Element(base, mid, s(I1)); e2 = Element(mid, top, s(I))
+            m = FrameModel([base, mid, top], [e1, e2],
+                [NodeForce(mid, [5.0e3u"N", 0.0u"N", 0.0u"N"]),
+                 NodeForce(top, [5.0e3u"N", 0.0u"N", 0.0u"N"])])
+            solve!(m); m
+        end
+        I0 = 8.0e-5; ε = 1.0e-3
+        m0 = mk(I0); m1 = mk(I0 * (1 + ε))                  # exact perturbed solve
+        ΔK = m1.elements[1].K - m0.elements[1].K            # exact element stiffness delta
+        g = m0.elements[1].globalID
+        f = zeros(m0.nDOFs); f[g] .-= ΔK * m0.u[g]          # perturbation load −ΔK u
+        Δu = linear_response(m0, f)                          # first-order prediction
+        exact = m1.u .- m0.u
+        # The first-order error (O(ε²)) is a small fraction of the step (O(ε)).
+        @test norm(exact) > 0
+        @test norm((m0.u .+ Δu) .- m1.u) < 1.0e-2 * norm(exact)
     end
 end

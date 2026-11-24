@@ -273,3 +273,42 @@ function drift_participation(model::AbstractModel, V::AbstractMatrix{<:Real};
     ids, c, nonframe = _participation(model, Vf, δ, reduction)
     return BatchedDriftParticipation(δ, ids, c, nonframe)
 end
+
+# =============================================================================
+# Linear response — reuse the cached factor for an arbitrary load (first-order
+# sizing sensitivity)
+# =============================================================================
+
+"""
+    linear_response(model, f::AbstractVector; links=nothing) -> Vector
+
+Full displacement response `u = K⁻¹ f` to a nodal load vector `f` (length
+`nDOFs`), reusing the model's cached stiffness factorization — one
+back-substitution, no refactorization. For a rigid-diaphragm model pass `links`;
+`f` is then reduced through `Gᵀ`, solved on the cached reduced factor, and the
+response recovered through `G` (`u = G u_retained`). `model` must already be
+solved/factored.
+
+This is the primitive behind first-order drift-sizing sensitivity: under a fixed
+external load, perturbing the element stiffnesses by `ΔK` shifts the
+displacement by
+
+    Δu ≈ −K⁻¹ (ΔK · u) = linear_response(model, −ΔK*u; links),
+
+so a resize step's redistributed displacements (and hence member demands) can be
+predicted from the *current* factor without a fresh solve — one extra RHS, like
+the virtual-load solve in [`drift_participation`](@ref). Sanity check: feeding
+the real applied load reproduces the real displacement,
+`linear_response(model, model.P .- model.Pf) ≈ model.u`.
+"""
+function linear_response(model::AbstractModel, f::AbstractVector{<:Real};
+                         links::Union{Nothing, AbstractVector} = nothing)
+    length(f) == model.nDOFs || error(
+        "linear_response: load vector has length $(length(f)); expected " *
+        "nDOFs = $(model.nDOFs).")
+    length(model.u) == model.nDOFs || error(
+        "linear_response: model is not solved; call solve!(model) first.")
+    reduction = _participation_reduction(model, links)
+    F = reshape(collect(Float64, f), model.nDOFs, 1)
+    return vec(_virtual_fields(model, F, reduction))
+end
