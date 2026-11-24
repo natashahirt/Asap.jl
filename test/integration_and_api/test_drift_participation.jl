@@ -129,4 +129,80 @@ using LinearAlgebra: dot
         # Querying a restrained DOF is a clear error.
         @test_throws ErrorException drift_participation(model, n1.globalID[1])
     end
+
+    # Shared 2-story cantilever column (two stacked elements) for the
+    # differential- and batched-virtual-load tests.
+    function _two_story_column()
+        h = 3.0; E = 200.0e9; I = 8.0e-5; A = 1.0e-2
+        sec = Section(A * u"m^2", E * u"Pa", 80.0e9u"Pa",
+                      I * u"m^4", I * u"m^4", 1.0e-6u"m^4")
+        base = Node([0.0u"m", 0.0u"m", 0.0u"m"], :fixed)
+        mid  = Node([0.0u"m", 0.0u"m", h * 1.0u"m"], :free)
+        top  = Node([0.0u"m", 0.0u"m", 2h * 1.0u"m"], :free)
+        e1 = Element(base, mid, sec); e2 = Element(mid, top, sec)
+        model = FrameModel([base, mid, top], [e1, e2],
+            [NodeForce(mid, [5.0e3u"N", 0.0u"N", 0.0u"N"]),
+             NodeForce(top, [5.0e3u"N", 0.0u"N", 0.0u"N"])])
+        solve!(model)
+        return model, mid, top
+    end
+
+    @testset "inter-story drift: differential DOF decomposes exactly" begin
+        model, mid, top = _two_story_column()
+        dtop = top.globalID[1]; dmid = mid.globalID[1]
+        # Virtual load +1 at the upper floor, −1 at the lower ⇒ the 2nd-story drift.
+        dp = drift_participation(model, dtop, dmid)
+        @test dp.δ ≈ model.u[dtop] - model.u[dmid] rtol = 1e-9
+        @test sum(dp.c) ≈ dp.δ rtol = 1e-9
+        @test abs(dp.nonframe) < 1e-8 * max(1.0, abs(dp.δ))
+        # The arbitrary-vector form agrees with the differential overload.
+        v = zeros(model.nDOFs); v[dtop] = 1.0; v[dmid] = -1.0
+        @test drift_participation(model, v).c ≈ dp.c rtol = 1e-12
+    end
+
+    @testset "batched virtual loads match single solves" begin
+        model, mid, top = _two_story_column()
+        dtop = top.globalID[1]; dmid = mid.globalID[1]
+        V = zeros(model.nDOFs, 2)
+        V[dtop, 1] = 1.0            # absolute drift at the top
+        V[dtop, 2] = 1.0; V[dmid, 2] = -1.0   # 2nd-story inter-story drift
+        bdp = drift_participation(model, V)
+        @test bdp isa BatchedDriftParticipation
+        d1 = drift_participation(model, dtop)
+        d2 = drift_participation(model, dtop, dmid)
+        @test bdp.c[:, 1] ≈ d1.c rtol = 1e-10
+        @test bdp.c[:, 2] ≈ d2.c rtol = 1e-10
+        @test bdp.δ[1] ≈ d1.δ rtol = 1e-12
+        @test bdp.δ[2] ≈ d2.δ rtol = 1e-12
+        @test bdp.element_ids == d1.element_ids
+    end
+
+    @testset "rigid diaphragm: participation through the reduced factor" begin
+        # Two columns tied to a diaphragm master (the rigid-link reduced solve).
+        # The master's X DOF is the story drift; the virtual load must be solved
+        # on the SAME reduced system, not the unreduced factor.
+        h = 4.0; E = 200.0e9; I = 8.0e-5; A = 1.0e-2; b = 1.5
+        sec = Section(A * u"m^2", E * u"Pa", 80.0e9u"Pa",
+                      I * u"m^4", I * u"m^4", 1.0e-6u"m^4")
+        base1 = Node([0.0u"m",  b * 1.0u"m", 0.0u"m"], :fixed)
+        base2 = Node([0.0u"m", -b * 1.0u"m", 0.0u"m"], :fixed)
+        top1  = Node([0.0u"m",  b * 1.0u"m", h * 1.0u"m"], :free)
+        top2  = Node([0.0u"m", -b * 1.0u"m", h * 1.0u"m"], :free)
+        master = Node([0.0u"m", 0.0u"m", h * 1.0u"m"], :free)
+        c1 = Element(base1, top1, sec); c2 = Element(base2, top2, sec)
+        model = FrameModel([base1, base2, top1, top2, master], [c1, c2],
+            [NodeForce(master, [1.0e4u"N", 0.0u"N", 0.0u"N"])])
+        links = [RigidLink(master, top1), RigidLink(master, top2)]
+        solve!(model, links)
+
+        md = master.globalID[1]
+        dp = drift_participation(model, md; links = links)
+        @test dp.δ ≈ model.u[md] rtol = 1e-9
+        # The links store no strain energy ⇒ the two columns carry all of δ.
+        @test sum(dp.c) ≈ dp.δ rtol = 1e-6
+        @test abs(dp.nonframe) < 1e-6 * max(1.0, abs(dp.δ))
+        @test length(dp.c) == 2
+        @test dp.c[1] ≈ dp.c[2] rtol = 1e-6         # symmetric columns participate equally
+        @test all(c -> c > 0, dp.c)
+    end
 end
